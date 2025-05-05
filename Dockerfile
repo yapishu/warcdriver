@@ -11,4 +11,4 @@ COPY --from=builder /out/warcer /warcer
 COPY --from=builder --chown=1000:1000 /data /data
 USER 1000:1000
 EXPOSE 8808
-ENTRYPOINT ["/warcdrive"]
+ENTRYPOINT ["/warcdriver"]
