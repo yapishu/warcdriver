@@ -138,7 +138,7 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 	}
 	domain := getDomainFromURL(parsedURL)
 	timestamp := time.Now().Unix()
-	filename := fmt.Sprintf("%s-crawl-%d.warc.gz", domain, timestamp)
+	filename := fmt.Sprintf("%s-%d.warc.gz", domain, timestamp)
 
 	path, urlsCrawled, err := crawlSubdomain(req.URL, filename, maxPages)
 	if err != nil {
