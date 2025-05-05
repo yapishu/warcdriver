@@ -12,6 +12,6 @@ curl  -X POST \
   http://localhost:8808/archive
 
 curl -X POST \
-  -d '{"url": "https://gwern.net/", "maxPages": "200"}' \
+  -d '{"url": "https://gwern.net/", "maxPages": 200}' \
   http://localhost:8808/crawl
 ```

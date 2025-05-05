@@ -176,7 +176,7 @@ func getDomainFromURL(parsedURL *url.URL) string {
 func archiveURLs(urls []string, filename string) (string, error) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	warcPath := filepath.Join(RootContentDir, "warc-temp", filename)
+	warcPath := filepath.Join(RootContentDir, filename)
 	if err := os.MkdirAll(filepath.Dir(warcPath), 0777); err != nil {
 		return "", err
 	}
@@ -228,7 +228,7 @@ func crawlSubdomain(startURL string, filename string, maxPages int) (string, []s
 		return "", nil, fmt.Errorf("couldn't determine base domain for %s", baseHost)
 	}
 
-	warcPath := filepath.Join(RootContentDir, "warc-temp", filename)
+	warcPath := filepath.Join(RootContentDir, filename)
 	if err := os.MkdirAll(filepath.Dir(warcPath), 0777); err != nil {
 		return "", nil, err
 	}

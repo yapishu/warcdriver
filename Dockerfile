@@ -4,11 +4,15 @@ COPY app/go.mod app/go.sum /src/
 RUN go mod download
 COPY app/main.go .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/warcdriver ./...
-RUN mkdir -p /data && chown -R 1000:1000 /data
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN mkdir -p /data && chown -R ${USER_ID}:${GROUP_ID} /data
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /out/warcdriver /warcdriver
-COPY --from=builder --chown=1000:1000 /data /data
-USER 1000:1000
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+COPY --from=builder --chown=${USER_ID}:${GROUP_ID} /data /data
+USER ${USER_ID}:${GROUP_ID}
 EXPOSE 8808
 ENTRYPOINT ["/warcdriver"]
