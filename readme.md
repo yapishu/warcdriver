@@ -4,6 +4,14 @@ this is an app for creating [WARC]() archives of URLs using a headless chrome br
 
 To use:
 
-- `docker compose up -d`
-- `curl  -X POST -d '{"urls": ["https://www.webrtc-developers.com/coturn-the-fragile-colossus/", "https://ahmet.im/blog/controller-pitfalls/"]}' http://localhost:8808/archive`
-- `curl -X POST -d '{"url": "https://gwern.net/", "maxPages": "200"}' http://localhost:8808/crawl`
+```bash
+docker compose up -d
+
+curl  -X POST \
+  -d '{"urls": ["https://www.webrtc-developers.com/coturn-the-fragile-colossus/", "https://ahmet.im/blog/controller-pitfalls/"]}' \
+  http://localhost:8808/archive
+
+curl -X POST \
+  -d '{"url": "https://gwern.net/", "maxPages": "200"}' \
+  http://localhost:8808/crawl
+```
