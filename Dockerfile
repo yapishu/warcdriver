@@ -8,7 +8,6 @@ RUN mkdir -p /data
 
 FROM gcr.io/distroless/static
 COPY --from=builder /out/warcdriver /warcdriver
-COPY --from=builder --chown=1000:1000 /data /data
-USER 1000:1000
+COPY --from=builder /data /data
 EXPOSE 8808
 ENTRYPOINT ["/warcdriver"]
