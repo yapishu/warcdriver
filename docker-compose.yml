@@ -16,9 +16,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        USER_ID: ${UID:-1000}
-        GROUP_ID: ${GID:-1000}
     restart: unless-stopped
     volumes:
       - ./data:/data
