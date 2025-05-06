@@ -29,6 +29,7 @@ type archiveRequest struct {
 type crawlRequest struct {
 	URL      string `json:"url"`
 	MaxPages int    `json:"maxPages,omitempty"`
+	Prefix   string `json:"string,omitempty"`
 }
 
 type archiveResponse struct {
@@ -129,6 +130,8 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 		maxPages = req.MaxPages
 	}
 
+	prefix := req.Prefix
+
 	// extract domain from URL and generate filename
 	parsedURL, err := url.Parse(req.URL)
 	if err != nil {
@@ -140,7 +143,7 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 	timestamp := time.Now().Unix()
 	filename := fmt.Sprintf("%s-%d.warc.gz", domain, timestamp)
 
-	path, urlsCrawled, err := crawlSubdomain(req.URL, filename, maxPages)
+	path, urlsCrawled, err := crawlSubdomain(req.URL, filename, maxPages, prefix)
 	if err != nil {
 		log.Printf("crawl error: %v", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -216,10 +219,14 @@ func archiveURLs(urls []string, filename string) (string, error) {
 	return warcPath, nil
 }
 
-func crawlSubdomain(startURL string, filename string, maxPages int) (string, []string, error) {
+func crawlSubdomain(startURL string, filename string, maxPages int, prefix string) (string, []string, error) {
 	parsedURL, err := url.Parse(startURL)
 	if err != nil {
 		return "", nil, err
+	}
+	if prefix == "" {
+		parsedStartURL, _ := url.Parse(startURL)
+		prefix = parsedStartURL.Scheme + "://" + parsedStartURL.Host
 	}
 
 	baseHost := parsedURL.Hostname()
@@ -279,7 +286,7 @@ func crawlSubdomain(startURL string, filename string, maxPages int) (string, []s
 				defer wg.Done()
 				defer func() { <-semaphore }()
 
-				links, err := crawlAndArchive(u, writer, &mu, domain)
+				links, err := crawlAndArchive(u, writer, &mu, domain, prefix)
 				if err != nil {
 					log.Printf("crawl error %s: %v", u, err)
 					return
@@ -310,13 +317,13 @@ func crawlSubdomain(startURL string, filename string, maxPages int) (string, []s
 	return warcPath, urlsCrawled, nil
 }
 
-func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain string) ([]string, error) {
+func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain string, prefix string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	allocCtx, cancelAlloc, err := remoteAllocator(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("allocator error: %w", err)
 	}
 	defer cancelAlloc()
 
@@ -326,43 +333,41 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 	var links []string
 	var linksLock sync.Mutex
 
+	// Write WARC info record only once
 	mu.Lock()
 	if _, err := writer.WriteInfoRecord(map[string]string{
-		"software": "warcdriver",
-		"format":   "WARC/1.1",
+		"software":   "warcdriver",
+		"format":     "WARC/1.1",
+		"crawl-time": time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		mu.Unlock()
-		return nil, err
+		return nil, fmt.Errorf("info record error: %w", err)
 	}
 	mu.Unlock()
 
 	var finalURL string
-	redirectMap := make(map[string]string)
 	var documentResponse *network.Response
 	var documentBody []byte
 	var documentRequestID network.RequestID
+	responses := make(map[network.RequestID]*network.Response)
+	var wg sync.WaitGroup
+	var errors []error
+	var errLock sync.Mutex
 
+	// Track redirects
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventRequestWillBeSent:
 			if e.Request.URL == pageURL && e.RedirectResponse != nil {
-				redirectMap[e.Request.URL] = e.RedirectResponse.URL
 				log.Printf("Redirect detected: %s -> %s", e.Request.URL, e.RedirectResponse.URL)
 			}
-		}
-	})
-
-	responses := make(map[network.RequestID]*network.Response)
-	var wg sync.WaitGroup
-
-	chromedp.ListenTarget(ctx, func(ev interface{}) {
-		switch e := ev.(type) {
 		case *network.EventResponseReceived:
 			responses[e.RequestID] = e.Response
 			if e.Type == network.ResourceTypeDocument && e.Response.URL != "" {
 				finalURL = e.Response.URL
 				documentResponse = e.Response
 				documentRequestID = e.RequestID
+				log.Printf("Document found: %s (status: %d)", e.Response.URL, int(e.Response.Status))
 			}
 		case *network.EventLoadingFinished:
 			if resp, ok := responses[e.RequestID]; ok {
@@ -375,9 +380,12 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 						body, err = network.GetResponseBody(reqID).Do(innerCtx)
 						return err
 					})); err != nil {
-						log.Printf("failed to get body for %s: %v", response.URL, err)
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to get body for %s: %w", response.URL, err))
+						errLock.Unlock()
 						return
 					}
+
 					if reqID == documentRequestID {
 						documentBody = body
 					}
@@ -389,8 +397,23 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 					reqRec.Header.Set("WARC-Record-ID", rid)
 					reqRec.Header.Set("WARC-Target-URI", response.URL)
 					reqRec.Header.Set("WARC-Date", now)
-					reqRec.Content.Write(headersToHTTP(response.RequestHeaders, response.URL))
-					reqRec.Content.Seek(0, 0)
+					reqContent := headersToHTTP(response.RequestHeaders, response.URL)
+					if _, err := reqRec.Content.Write(reqContent); err != nil {
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to write request content for %s: %w", response.URL, err))
+						errLock.Unlock()
+						reqRec.Content.Close()
+						return
+					}
+
+					if _, err := reqRec.Content.Seek(0, 0); err != nil {
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to seek request content for %s: %w", response.URL, err))
+						errLock.Unlock()
+						reqRec.Content.Close()
+						return
+					}
+
 					respRec := warc.NewRecord(os.TempDir(), false)
 					respRec.Header.Set("WARC-Type", "response")
 					respRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
@@ -398,8 +421,26 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 					respRec.Header.Set("WARC-Target-URI", response.URL)
 					respRec.Header.Set("WARC-Date", now)
 					respRec.Header.Set("Content-Type", "application/http; msgtype=response")
-					respRec.Content.Write(buildHTTPResp(response, body))
-					respRec.Content.Seek(0, 0)
+
+					respContent := buildHTTPResp(response, body)
+					if _, err := respRec.Content.Write(respContent); err != nil {
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to write response content for %s: %w", response.URL, err))
+						errLock.Unlock()
+						reqRec.Content.Close()
+						respRec.Content.Close()
+						return
+					}
+
+					if _, err := respRec.Content.Seek(0, 0); err != nil {
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to seek response content for %s: %w", response.URL, err))
+						errLock.Unlock()
+						reqRec.Content.Close()
+						respRec.Content.Close()
+						return
+					}
+
 					for k, v := range response.Headers {
 						if strings.EqualFold(k, "content-type") {
 							if ct, ok := v.(string); ok && ct != "" {
@@ -408,14 +449,26 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 							break
 						}
 					}
-					respRec.Content.Seek(0, 0)
+
+					// write to file
 					mu.Lock()
-					writer.WriteRecord(reqRec)
-					writer.WriteRecord(respRec)
+					if _, err := writer.WriteRecord(reqRec); err != nil {
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to write request record for %s: %w", response.URL, err))
+						errLock.Unlock()
+					}
+
+					if _, err := writer.WriteRecord(respRec); err != nil {
+						errLock.Lock()
+						errors = append(errors, fmt.Errorf("failed to write response record for %s: %w", response.URL, err))
+						errLock.Unlock()
+					}
 					mu.Unlock()
+
 					reqRec.Content.Close()
 					respRec.Content.Close()
 				}(e.RequestID, resp)
+
 				delete(responses, e.RequestID)
 			}
 		}
@@ -426,33 +479,50 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 		chromedp.Navigate(pageURL),
 		chromedp.Sleep(3*time.Second),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			// extract all links on the page
 			var allLinks []string
 			if err := chromedp.Run(ctx, chromedp.Evaluate(`
-				Array.from(document.querySelectorAll('a[href]')).map(a => a.href)
+				Array.from(document.querySelectorAll('a[href]')).map(a => {
+					try {
+						return new URL(a.href).href;
+					} catch(e) {
+						return '';
+					}
+				}).filter(href => href !== '')
 			`, &allLinks)); err != nil {
-				return err
+				return fmt.Errorf("failed to extract links: %w", err)
 			}
 
 			linksLock.Lock()
 			defer linksLock.Unlock()
 
 			for _, link := range allLinks {
-				if linkBelongsToDomain(link, domain) {
+				if linkBelongsToDomain(link, domain) && strings.HasPrefix(link, prefix) {
 					links = append(links, link)
 				}
 			}
 			return nil
 		}),
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("navigation error: %w", err)
 	}
-
 	wg.Wait()
 
+	errLock.Lock()
+	if len(errors) > 0 {
+		log.Printf("Encountered %d errors while processing %s", len(errors), pageURL)
+		for i, err := range errors {
+			if i < 5 {
+				log.Printf("Error %d: %v", i+1, err)
+			}
+		}
+	}
+	errLock.Unlock()
+
+	// redirect rewrites
 	if finalURL != "" && finalURL != pageURL && documentResponse != nil && documentBody != nil {
 		now := time.Now().UTC().Format(time.RFC3339)
 		origReqID := "<urn:uuid:" + uuid.NewString() + ">"
+
 		origReqRec := warc.NewRecord(os.TempDir(), false)
 		origReqRec.Header.Set("WARC-Type", "request")
 		origReqRec.Header.Set("WARC-Record-ID", origReqID)
@@ -462,8 +532,19 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 		for k, v := range documentResponse.RequestHeaders {
 			fakeReqHeaders[k] = v
 		}
-		origReqRec.Content.Write(headersToHTTP(fakeReqHeaders, pageURL))
-		origReqRec.Content.Seek(0, 0)
+
+		if _, err := origReqRec.Content.Write(headersToHTTP(fakeReqHeaders, pageURL)); err != nil {
+			log.Printf("Failed to write request headers for redirect: %v", err)
+			origReqRec.Content.Close()
+			return links, nil
+		}
+
+		if _, err := origReqRec.Content.Seek(0, 0); err != nil {
+			log.Printf("Failed to seek request content for redirect: %v", err)
+			origReqRec.Content.Close()
+			return links, nil
+		}
+
 		origRespRec := warc.NewRecord(os.TempDir(), false)
 		origRespRec.Header.Set("WARC-Type", "response")
 		origRespRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
@@ -476,9 +557,25 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 		modifiedResponse.URL = pageURL
 		modifiedResponse.Status = 301
 		modifiedResponse.StatusText = "Moved Permanently"
+		modifiedResponse.Headers = make(network.Headers)
+		for k, v := range documentResponse.Headers {
+			modifiedResponse.Headers[k] = v
+		}
 		modifiedResponse.Headers["Location"] = finalURL
-		origRespRec.Content.Write(buildHTTPResp(&modifiedResponse, documentBody))
-		origRespRec.Content.Seek(0, 0)
+		if _, err := origRespRec.Content.Write(buildHTTPResp(&modifiedResponse, nil)); err != nil {
+			log.Printf("Failed to write response content for redirect: %v", err)
+			origReqRec.Content.Close()
+			origRespRec.Content.Close()
+			return links, nil
+		}
+
+		if _, err := origRespRec.Content.Seek(0, 0); err != nil {
+			log.Printf("Failed to seek response content for redirect: %v", err)
+			origReqRec.Content.Close()
+			origRespRec.Content.Close()
+			return links, nil
+		}
+
 		for k, v := range documentResponse.Headers {
 			if strings.EqualFold(k, "content-type") {
 				if ct, ok := v.(string); ok && ct != "" {
@@ -487,16 +584,37 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 				break
 			}
 		}
-		origRespRec.Content.Seek(0, 0)
+
 		mu.Lock()
-		writer.WriteRecord(origReqRec)
-		writer.WriteRecord(origRespRec)
+		if _, err := writer.WriteRecord(origReqRec); err != nil {
+			log.Printf("Failed to write request record for redirect: %v", err)
+		}
+
+		if _, err := writer.WriteRecord(origRespRec); err != nil {
+			log.Printf("Failed to write response record for redirect: %v", err)
+		}
 		mu.Unlock()
+
 		origReqRec.Content.Close()
 		origRespRec.Content.Close()
 	}
 
-	return links, nil
+	return deduplicateLinks(links), nil
+}
+
+// Helper function to deduplicate links
+func deduplicateLinks(links []string) []string {
+	seen := make(map[string]bool)
+	result := []string{}
+
+	for _, link := range links {
+		if !seen[link] {
+			seen[link] = true
+			result = append(result, link)
+		}
+	}
+
+	return result
 }
 
 func getBaseDomain(host string) string {
@@ -522,9 +640,8 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 
 	mu.Lock()
 	if _, err := writer.WriteInfoRecord(map[string]string{
-		"software": "karakeep-warcer",
+		"software": "warcdriver",
 		"format":   "WARC/1.1",
-		"isPartOf": "karakeep",
 	}); err != nil {
 		mu.Unlock()
 		return err
@@ -724,7 +841,30 @@ func headersToHTTP(h network.Headers, urlStr string) []byte {
 func buildHTTPResp(resp *network.Response, body []byte) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", int(resp.Status), resp.StatusText)
-	writeHdrs(&b, resp.Headers)
+	hasContentLength := false
+	for k, v := range resp.Headers {
+		if strings.EqualFold(k, "content-length") {
+			hasContentLength = true
+			fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
+			continue
+		}
+		if !strings.HasPrefix(k, ":") {
+			switch vv := v.(type) {
+			case string:
+				fmt.Fprintf(&b, "%s: %s\r\n", k, vv)
+			case []string:
+				for _, s := range vv {
+					fmt.Fprintf(&b, "%s: %s\r\n", k, s)
+				}
+			default:
+				fmt.Fprintf(&b, "%s: %v\r\n", k, vv)
+			}
+		}
+	}
+	if !hasContentLength && len(body) > 0 {
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
+	}
+	b.WriteString("\r\n")
 	b.Write(body)
 	return b.Bytes()
 }
