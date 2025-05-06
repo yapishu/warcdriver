@@ -340,7 +340,17 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 		currentURL := urlQueue[0]
 		urlQueue = urlQueue[1:]
 
-		if visitedURLs[currentURL] {
+		currentParsed, err := url.Parse(currentURL)
+		if err != nil {
+			continue
+		}
+
+		baseURL := currentParsed.Scheme + "://" + currentParsed.Host + currentParsed.Path
+		if currentParsed.RawQuery != "" {
+			baseURL += "?" + currentParsed.RawQuery
+		}
+
+		if visitedURLs[baseURL] {
 			continue
 		}
 
@@ -349,7 +359,7 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 			break
 		}
 
-		visitedURLs[currentURL] = true
+		visitedURLs[baseURL] = true
 		crawledURLs = append(crawledURLs, currentURL)
 
 		log.Printf("Crawling page %d/%d: %s", atomic.LoadInt32(&pagesProcessed), maxPages, currentURL)
@@ -357,7 +367,7 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 		tabCtx, cancelTab := chromedp.NewContext(allocCtx)
 		var links []string
 
-		err := chromedp.Run(tabCtx,
+		err = chromedp.Run(tabCtx,
 			network.Enable(),
 			chromedp.Navigate(currentURL),
 			chromedp.Sleep(2*time.Second),
@@ -423,7 +433,7 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 	var archiveWg sync.WaitGroup
 	var archivedCount int32
 
-	archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer archiveCancel()
 
 	for _, urlToArchive := range crawledURLs {
@@ -464,37 +474,34 @@ func shouldCrawl(linkURL string, domain string, prefix string, visitedURLs map[s
 	if err != nil {
 		return false
 	}
-
 	if !strings.Contains(parsedURL.Hostname(), domain) {
 		return false
 	}
-
 	if prefix != "" && !strings.HasPrefix(linkURL, prefix) {
 		return false
 	}
-
-	if visitedURLs[linkURL] {
+	baseURL := parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path
+	if parsedURL.RawQuery != "" {
+		baseURL += "?" + parsedURL.RawQuery
+	}
+	if visitedURLs[baseURL] {
 		return false
 	}
-
 	path := strings.ToLower(parsedURL.Path)
 	resourceExts := []string{
 		".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg",
 		".woff", ".woff2", ".ttf", ".otf", ".eot", ".ico", ".pdf",
 		".mp3", ".mp4", ".webm", ".webp", ".json",
 	}
-
 	for _, ext := range resourceExts {
 		if strings.HasSuffix(path, ext) {
 			return false
 		}
 	}
-
 	resourceDirs := []string{
 		"/font/", "/fonts/", "/static/", "/assets/",
 		"/img/", "/images/", "/css/", "/js/", "/media/",
 	}
-
 	for _, dir := range resourceDirs {
 		if strings.Contains(path, dir) {
 			return false
@@ -507,16 +514,6 @@ func shouldCrawl(linkURL string, domain string, prefix string, visitedURLs map[s
 func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 	var wg sync.WaitGroup
 
-	mu.Lock()
-	if _, err := writer.WriteInfoRecord(map[string]string{
-		"software": "warcdriver",
-		"format":   "WARC/1.1",
-	}); err != nil {
-		mu.Unlock()
-		return err
-	}
-	mu.Unlock()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -525,13 +522,16 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 		return err
 	}
 	defer cancelAlloc()
+
 	ctx, cancelBrowse := chromedp.NewContext(allocCtx)
 	defer cancelBrowse()
+
 	var finalURL string
 	redirectMap := make(map[string]string)
 	var documentResponse *network.Response
 	var documentBody []byte
 	var documentRequestID network.RequestID
+
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventRequestWillBeSent:
@@ -572,6 +572,9 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 
 					now := time.Now().UTC().Format(time.RFC3339)
 					rid := "<urn:uuid:" + uuid.NewString() + ">"
+
+					mu.Lock()
+
 					reqRec := warc.NewRecord(os.TempDir(), false)
 					reqRec.Header.Set("WARC-Type", "request")
 					reqRec.Header.Set("WARC-Record-ID", rid)
@@ -579,6 +582,7 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 					reqRec.Header.Set("WARC-Date", now)
 					reqRec.Content.Write(headersToHTTP(response.RequestHeaders, response.URL))
 					reqRec.Content.Seek(0, 0)
+
 					respRec := warc.NewRecord(os.TempDir(), false)
 					respRec.Header.Set("WARC-Type", "response")
 					respRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
@@ -588,6 +592,7 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 					respRec.Header.Set("Content-Type", "application/http; msgtype=response")
 					respRec.Content.Write(buildHTTPResp(response, body))
 					respRec.Content.Seek(0, 0)
+
 					for k, v := range response.Headers {
 						if strings.EqualFold(k, "content-type") {
 							if ct, ok := v.(string); ok && ct != "" {
@@ -596,11 +601,12 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 							break
 						}
 					}
+
 					respRec.Content.Seek(0, 0)
-					mu.Lock()
 					writer.WriteRecord(reqRec)
 					writer.WriteRecord(respRec)
 					mu.Unlock()
+
 					reqRec.Content.Close()
 					respRec.Content.Close()
 				}(e.RequestID, resp)
@@ -618,21 +624,27 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 	}
 
 	wg.Wait()
+
 	if finalURL != "" && finalURL != urlInput && documentResponse != nil && documentBody != nil {
-		// hacky trick for rewriting redirected pages for the warc viewer
 		now := time.Now().UTC().Format(time.RFC3339)
 		origReqID := "<urn:uuid:" + uuid.NewString() + ">"
+
+		mu.Lock()
+
 		origReqRec := warc.NewRecord(os.TempDir(), false)
 		origReqRec.Header.Set("WARC-Type", "request")
 		origReqRec.Header.Set("WARC-Record-ID", origReqID)
 		origReqRec.Header.Set("WARC-Target-URI", urlInput)
 		origReqRec.Header.Set("WARC-Date", now)
+
 		fakeReqHeaders := make(network.Headers)
 		for k, v := range documentResponse.RequestHeaders {
 			fakeReqHeaders[k] = v
 		}
+
 		origReqRec.Content.Write(headersToHTTP(fakeReqHeaders, urlInput))
 		origReqRec.Content.Seek(0, 0)
+
 		origRespRec := warc.NewRecord(os.TempDir(), false)
 		origRespRec.Header.Set("WARC-Type", "response")
 		origRespRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
@@ -640,14 +652,17 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 		origRespRec.Header.Set("WARC-Target-URI", urlInput)
 		origRespRec.Header.Set("WARC-Date", now)
 		origRespRec.Header.Set("Content-Type", "application/http; msgtype=response")
+
 		var modifiedResponse network.Response
 		modifiedResponse = *documentResponse
 		modifiedResponse.URL = urlInput
 		modifiedResponse.Status = 301
 		modifiedResponse.StatusText = "Moved Permanently"
 		modifiedResponse.Headers["Location"] = finalURL
+
 		origRespRec.Content.Write(buildHTTPResp(&modifiedResponse, documentBody))
 		origRespRec.Content.Seek(0, 0)
+
 		for k, v := range documentResponse.Headers {
 			if strings.EqualFold(k, "content-type") {
 				if ct, ok := v.(string); ok && ct != "" {
@@ -656,29 +671,41 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 				break
 			}
 		}
+
 		origRespRec.Content.Seek(0, 0)
-		mu.Lock()
 		writer.WriteRecord(origReqRec)
 		writer.WriteRecord(origRespRec)
-		mu.Unlock()
-		origReqRec.Content.Close()
-		origRespRec.Content.Close()
+
 		metaRec := warc.NewRecord(os.TempDir(), false)
 		metaRec.Header.Set("WARC-Type", "metadata")
 		metaRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
 		metaRec.Header.Set("WARC-Target-URI", urlInput)
 		metaRec.Header.Set("WARC-Date", now)
 		metaRec.Header.Set("Content-Type", "application/warc-fields")
+
 		var metaContent bytes.Buffer
 		metaContent.WriteString(fmt.Sprintf("original-url: %s\r\n", urlInput))
 		metaContent.WriteString(fmt.Sprintf("final-url: %s\r\n", finalURL))
 		metaContent.WriteString("note: This URL redirects, but a copy of the content has been duplicated here for WARC viewer compatibility\r\n")
+
 		metaRec.Content.Write(metaContent.Bytes())
 		metaRec.Content.Seek(0, 0)
-		mu.Lock()
 		writer.WriteRecord(metaRec)
 		mu.Unlock()
+
+		origReqRec.Content.Close()
+		origRespRec.Content.Close()
 		metaRec.Content.Close()
+	} else {
+		mu.Lock()
+		if _, err := writer.WriteInfoRecord(map[string]string{
+			"software": "warcdriver",
+			"format":   "WARC/1.1",
+		}); err != nil {
+			mu.Unlock()
+			return err
+		}
+		mu.Unlock()
 	}
 
 	return nil
