@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CorentinB/warc"
@@ -319,9 +320,18 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 	}
 
 	domain := parsedURL.Hostname()
+	log.Printf("Starting crawl of domain %s with prefix %s", domain, prefix)
+
+	// Create the crawl manager
 	manager := NewCrawlManager(domain, prefix)
+
+	// Add the start URL
 	manager.AddURL(startURL)
+
+	// Create a queue for BFS crawling
 	urlQueue := []string{startURL}
+
+	// Create Chrome context for crawling
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -330,27 +340,49 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 		return nil, nil, err
 	}
 	defer cancelAlloc()
-	sem := make(chan struct{}, 5)
-	var wg sync.WaitGroup
-	pagesProcessed := 0
 
-	for len(urlQueue) > 0 && pagesProcessed < maxPages {
+	// Limit concurrent crawlers
+	sem := make(chan struct{}, 3) // Reduce concurrency to 3
+	var wg sync.WaitGroup
+
+	// Use atomic counter for tracking pages
+	var pagesProcessed int32
+
+	// Process queue until maxPages or queue is empty
+	for len(urlQueue) > 0 {
+		// Check if we've hit the limit
+		if atomic.LoadInt32(&pagesProcessed) >= int32(maxPages) {
+			log.Printf("Reached max page limit of %d", maxPages)
+			break
+		}
+
+		// Get next URL to process
 		currentURL := urlQueue[0]
 		urlQueue = urlQueue[1:]
+
+		// Skip resources during crawling phase
 		if manager.IsResource(currentURL) {
 			continue
 		}
 
-		pagesProcessed++
+		// Increment counter BEFORE processing
+		if atomic.AddInt32(&pagesProcessed, 1) > int32(maxPages) {
+			// We've exceeded the limit
+			atomic.AddInt32(&pagesProcessed, -1) // Decrement back
+			break
+		}
 
+		// Process the URL
 		wg.Add(1)
 		sem <- struct{}{}
 
-		go func(url string) {
+		go func(url string, pageNum int32) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			log.Printf("Crawling %s (%d/%d)", url, pagesProcessed, maxPages)
+			log.Printf("Crawling page %d/%d: %s", pageNum, maxPages, url)
+
+			// Create a new browser context for each page
 			tabCtx, cancelTab := chromedp.NewContext(allocCtx)
 			defer cancelTab()
 
@@ -376,6 +408,7 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 				return
 			}
 
+			// Also collect resource URLs
 			var resources []string
 
 			_ = chromedp.Run(tabCtx,
@@ -388,23 +421,43 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
                 `, &resources),
 			)
 
+			// Process found links, but check page limit
+			manager.Mutex.Lock()
 			for _, link := range links {
-				if manager.ShouldProcess(link) && manager.AddURL(link) {
-					if !manager.IsResource(link) {
-						urlQueue = append(urlQueue, link)
+				if manager.ShouldProcess(link) && !manager.AllURLs[link] {
+					manager.AllURLs[link] = true
+					if manager.IsResource(link) {
+						manager.ResourceURLs[link] = true
+					} else {
+						manager.ContentURLs[link] = true
+						// Only add to queue if we haven't reached the limit
+						if atomic.LoadInt32(&pagesProcessed) < int32(maxPages) {
+							urlQueue = append(urlQueue, link)
+						}
 					}
 				}
 			}
+
+			// Process all resources
 			for _, res := range resources {
-				if manager.ShouldProcess(res) {
-					manager.AddURL(res)
+				if manager.ShouldProcess(res) && !manager.AllURLs[res] {
+					manager.AllURLs[res] = true
+					manager.ResourceURLs[res] = true
 				}
 			}
-		}(currentURL)
+			manager.Mutex.Unlock()
+		}(currentURL, atomic.LoadInt32(&pagesProcessed))
 	}
 
+	// Wait for all crawlers to finish
 	wg.Wait()
+
+	// Get URLs to archive - limit to max pages worth of content
 	urlsToArchive := manager.GetAllURLsToArchive()
+	log.Printf("Found %d URLs to archive (%d content, %d resources)",
+		len(urlsToArchive), len(manager.ContentURLs), len(manager.ResourceURLs))
+
+	// Now archive all URLs
 	tempDir, err := os.MkdirTemp("", "warc-*")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create temp dir: %w", err)
@@ -418,17 +471,21 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 	}
 	defer f.Close()
 
+	isGz := false
 	writer, err := warc.NewWriter(
 		f,
 		filepath.Base(warcPath),
 		"GZIP",
 		"",
-		false,
+		isGz,
 		nil,
 	)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Write WARC info record
+	var mu sync.Mutex
 	if _, err := writer.WriteInfoRecord(map[string]string{
 		"software":   "warcdriver",
 		"format":     "WARC/1.1",
@@ -436,31 +493,65 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 	}); err != nil {
 		return nil, nil, err
 	}
-	var archiveMutex sync.Mutex
+
+	// Archive each URL - with a timeout to ensure we don't wait forever
 	archiveSem := make(chan struct{}, 5)
 	var archiveWg sync.WaitGroup
 
+	archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer archiveCancel()
+
+	// Add a counter for archiving progress
+	var archivedCount int32
+	totalToArchive := len(urlsToArchive)
+
 	for _, urlToArchive := range urlsToArchive {
+		// Check for context timeout
+		select {
+		case <-archiveCtx.Done():
+			log.Printf("Archive timeout reached, stopping")
+			goto FinishArchiving
+		default:
+			// Continue processing
+		}
+
 		archiveWg.Add(1)
 		archiveSem <- struct{}{}
 
 		go func(urlStr string) {
 			defer archiveWg.Done()
 			defer func() { <-archiveSem }()
-			if err := archiveUrl(urlStr, writer, &archiveMutex); err != nil {
+
+			// Skip archiving if there's an error
+			if err := archiveUrl(urlStr, writer, &mu); err != nil {
 				log.Printf("Error archiving %s: %v", urlStr, err)
+			} else {
+				count := atomic.AddInt32(&archivedCount, 1)
+				if count%10 == 0 {
+					log.Printf("Archived %d/%d URLs", count, totalToArchive)
+				}
 			}
 		}(urlToArchive)
 	}
 
+FinishArchiving:
 	archiveWg.Wait()
+	log.Printf("Archived %d/%d URLs", atomic.LoadInt32(&archivedCount), totalToArchive)
+
+	// Close the file and read it
 	f.Close()
 	content, err := os.ReadFile(warcPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read WARC file: %w", err)
 	}
 
-	return content, urlsToArchive, nil
+	// Make sure we only return the URLs we crawled as content pages
+	var contentURLs []string
+	for url := range manager.ContentURLs {
+		contentURLs = append(contentURLs, url)
+	}
+
+	return content, contentURLs, nil
 }
 
 func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
