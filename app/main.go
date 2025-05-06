@@ -333,7 +333,10 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 	var links []string
 	var linksLock sync.Mutex
 
-	// Write WARC info record only once
+	// Track processed resources to avoid duplicates
+	resourcesProcessed := make(map[string]bool)
+
+	// Write WARC info record
 	mu.Lock()
 	if _, err := writer.WriteInfoRecord(map[string]string{
 		"software":   "warcdriver",
@@ -345,16 +348,48 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 	}
 	mu.Unlock()
 
+	// Track responses
 	var finalURL string
 	var documentResponse *network.Response
 	var documentBody []byte
 	var documentRequestID network.RequestID
 	responses := make(map[network.RequestID]*network.Response)
 	var wg sync.WaitGroup
-	var errors []error
-	var errLock sync.Mutex
 
-	// Track redirects
+	// Resource filter patterns - these will be skipped for WARC recording
+	resourceExts := []string{
+		".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+		".woff", ".woff2", ".ttf", ".otf", ".eot", ".ico",
+	}
+
+	// Check if URL is a resource to skip
+	isResourceURL := func(urlStr string) bool {
+		parsedURL, err := url.Parse(urlStr)
+		if err != nil {
+			return false
+		}
+
+		// Check file extension
+		path := parsedURL.Path
+		for _, ext := range resourceExts {
+			if strings.HasSuffix(strings.ToLower(path), ext) {
+				return true
+			}
+		}
+
+		// Check for font directories
+		if strings.Contains(path, "/font/") || strings.Contains(path, "/fonts/") {
+			return true
+		}
+
+		// Check for static asset directories
+		if strings.Contains(path, "/static/") || strings.Contains(path, "/assets/") {
+			return true
+		}
+
+		return false
+	}
+
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventRequestWillBeSent:
@@ -362,58 +397,67 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 				log.Printf("Redirect detected: %s -> %s", e.Request.URL, e.RedirectResponse.URL)
 			}
 		case *network.EventResponseReceived:
-			responses[e.RequestID] = e.Response
+			// Only track the main document and skip resources
 			if e.Type == network.ResourceTypeDocument && e.Response.URL != "" {
 				finalURL = e.Response.URL
 				documentResponse = e.Response
 				documentRequestID = e.RequestID
+				responses[e.RequestID] = e.Response
 				log.Printf("Document found: %s (status: %d)", e.Response.URL, int(e.Response.Status))
+			} else if !isResourceURL(e.Response.URL) {
+				// Store other non-resource responses
+				responses[e.RequestID] = e.Response
 			}
 		case *network.EventLoadingFinished:
 			if resp, ok := responses[e.RequestID]; ok {
+				// Skip if we've already processed this URL
+				if resourcesProcessed[resp.URL] {
+					delete(responses, e.RequestID)
+					return
+				}
+
+				// Mark as processed
+				resourcesProcessed[resp.URL] = true
+
 				wg.Add(1)
 				go func(reqID network.RequestID, response *network.Response) {
 					defer wg.Done()
+
+					// Skip resource URLs
+					if isResourceURL(response.URL) {
+						return
+					}
+
+					// Get response body
 					var body []byte
 					if err := chromedp.Run(ctx, chromedp.ActionFunc(func(innerCtx context.Context) error {
 						var err error
 						body, err = network.GetResponseBody(reqID).Do(innerCtx)
 						return err
 					})); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to get body for %s: %w", response.URL, err))
-						errLock.Unlock()
+						log.Printf("Failed to get body for %s: %v", response.URL, err)
 						return
 					}
 
+					// Store document body for main page
 					if reqID == documentRequestID {
 						documentBody = body
 					}
 
+					// Create WARC records
 					now := time.Now().UTC().Format(time.RFC3339)
 					rid := "<urn:uuid:" + uuid.NewString() + ">"
+
+					// Create request record
 					reqRec := warc.NewRecord(os.TempDir(), false)
 					reqRec.Header.Set("WARC-Type", "request")
 					reqRec.Header.Set("WARC-Record-ID", rid)
 					reqRec.Header.Set("WARC-Target-URI", response.URL)
 					reqRec.Header.Set("WARC-Date", now)
-					reqContent := headersToHTTP(response.RequestHeaders, response.URL)
-					if _, err := reqRec.Content.Write(reqContent); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to write request content for %s: %w", response.URL, err))
-						errLock.Unlock()
-						reqRec.Content.Close()
-						return
-					}
+					reqRec.Content.Write(headersToHTTP(response.RequestHeaders, response.URL))
+					reqRec.Content.Seek(0, 0)
 
-					if _, err := reqRec.Content.Seek(0, 0); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to seek request content for %s: %w", response.URL, err))
-						errLock.Unlock()
-						reqRec.Content.Close()
-						return
-					}
-
+					// Create response record
 					respRec := warc.NewRecord(os.TempDir(), false)
 					respRec.Header.Set("WARC-Type", "response")
 					respRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
@@ -421,26 +465,10 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 					respRec.Header.Set("WARC-Target-URI", response.URL)
 					respRec.Header.Set("WARC-Date", now)
 					respRec.Header.Set("Content-Type", "application/http; msgtype=response")
+					respRec.Content.Write(buildHTTPResp(response, body))
+					respRec.Content.Seek(0, 0)
 
-					respContent := buildHTTPResp(response, body)
-					if _, err := respRec.Content.Write(respContent); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to write response content for %s: %w", response.URL, err))
-						errLock.Unlock()
-						reqRec.Content.Close()
-						respRec.Content.Close()
-						return
-					}
-
-					if _, err := respRec.Content.Seek(0, 0); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to seek response content for %s: %w", response.URL, err))
-						errLock.Unlock()
-						reqRec.Content.Close()
-						respRec.Content.Close()
-						return
-					}
-
+					// Set content type if available
 					for k, v := range response.Headers {
 						if strings.EqualFold(k, "content-type") {
 							if ct, ok := v.(string); ok && ct != "" {
@@ -450,21 +478,13 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 						}
 					}
 
-					// write to file
+					// Write records to WARC file
 					mu.Lock()
-					if _, err := writer.WriteRecord(reqRec); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to write request record for %s: %w", response.URL, err))
-						errLock.Unlock()
-					}
-
-					if _, err := writer.WriteRecord(respRec); err != nil {
-						errLock.Lock()
-						errors = append(errors, fmt.Errorf("failed to write response record for %s: %w", response.URL, err))
-						errLock.Unlock()
-					}
+					writer.WriteRecord(reqRec)
+					writer.WriteRecord(respRec)
 					mu.Unlock()
 
+					// Clean up
 					reqRec.Content.Close()
 					respRec.Content.Close()
 				}(e.RequestID, resp)
@@ -474,16 +494,18 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 		}
 	})
 
+	// Enable network monitoring and navigate to the page
 	if err := chromedp.Run(ctx,
 		network.Enable(),
 		chromedp.Navigate(pageURL),
 		chromedp.Sleep(3*time.Second),
 		chromedp.ActionFunc(func(ctx context.Context) error {
+			// Extract all links - but filter out resource URLs
 			var allLinks []string
 			if err := chromedp.Run(ctx, chromedp.Evaluate(`
 				Array.from(document.querySelectorAll('a[href]')).map(a => {
 					try {
-						return new URL(a.href).href;
+						return new URL(a.href, window.location.href).href;
 					} catch(e) {
 						return '';
 					}
@@ -495,8 +517,11 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 			linksLock.Lock()
 			defer linksLock.Unlock()
 
+			// Filter links
 			for _, link := range allLinks {
-				if linkBelongsToDomain(link, domain) && strings.HasPrefix(link, prefix) {
+				if linkBelongsToDomain(link, domain) &&
+					strings.HasPrefix(link, prefix) &&
+					!isResourceURL(link) {
 					links = append(links, link)
 				}
 			}
@@ -505,46 +530,31 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 	); err != nil {
 		return nil, fmt.Errorf("navigation error: %w", err)
 	}
+
+	// Wait for all resources to be processed
 	wg.Wait()
 
-	errLock.Lock()
-	if len(errors) > 0 {
-		log.Printf("Encountered %d errors while processing %s", len(errors), pageURL)
-		for i, err := range errors {
-			if i < 5 {
-				log.Printf("Error %d: %v", i+1, err)
-			}
-		}
-	}
-	errLock.Unlock()
-
-	// redirect rewrites
+	// Handle redirect case
 	if finalURL != "" && finalURL != pageURL && documentResponse != nil && documentBody != nil {
 		now := time.Now().UTC().Format(time.RFC3339)
 		origReqID := "<urn:uuid:" + uuid.NewString() + ">"
 
+		// Create request record for original URL
 		origReqRec := warc.NewRecord(os.TempDir(), false)
 		origReqRec.Header.Set("WARC-Type", "request")
 		origReqRec.Header.Set("WARC-Record-ID", origReqID)
 		origReqRec.Header.Set("WARC-Target-URI", pageURL)
 		origReqRec.Header.Set("WARC-Date", now)
+
+		// Copy headers from document response
 		fakeReqHeaders := make(network.Headers)
 		for k, v := range documentResponse.RequestHeaders {
 			fakeReqHeaders[k] = v
 		}
+		origReqRec.Content.Write(headersToHTTP(fakeReqHeaders, pageURL))
+		origReqRec.Content.Seek(0, 0)
 
-		if _, err := origReqRec.Content.Write(headersToHTTP(fakeReqHeaders, pageURL)); err != nil {
-			log.Printf("Failed to write request headers for redirect: %v", err)
-			origReqRec.Content.Close()
-			return links, nil
-		}
-
-		if _, err := origReqRec.Content.Seek(0, 0); err != nil {
-			log.Printf("Failed to seek request content for redirect: %v", err)
-			origReqRec.Content.Close()
-			return links, nil
-		}
-
+		// Create response record for redirect
 		origRespRec := warc.NewRecord(os.TempDir(), false)
 		origRespRec.Header.Set("WARC-Type", "response")
 		origRespRec.Header.Set("WARC-Record-ID", "<urn:uuid:"+uuid.NewString()+">")
@@ -552,6 +562,8 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 		origRespRec.Header.Set("WARC-Target-URI", pageURL)
 		origRespRec.Header.Set("WARC-Date", now)
 		origRespRec.Header.Set("Content-Type", "application/http; msgtype=response")
+
+		// Create modified response for redirect
 		var modifiedResponse network.Response
 		modifiedResponse = *documentResponse
 		modifiedResponse.URL = pageURL
@@ -562,20 +574,10 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 			modifiedResponse.Headers[k] = v
 		}
 		modifiedResponse.Headers["Location"] = finalURL
-		if _, err := origRespRec.Content.Write(buildHTTPResp(&modifiedResponse, nil)); err != nil {
-			log.Printf("Failed to write response content for redirect: %v", err)
-			origReqRec.Content.Close()
-			origRespRec.Content.Close()
-			return links, nil
-		}
+		origRespRec.Content.Write(buildHTTPResp(&modifiedResponse, nil))
+		origRespRec.Content.Seek(0, 0)
 
-		if _, err := origRespRec.Content.Seek(0, 0); err != nil {
-			log.Printf("Failed to seek response content for redirect: %v", err)
-			origReqRec.Content.Close()
-			origRespRec.Content.Close()
-			return links, nil
-		}
-
+		// Set content type
 		for k, v := range documentResponse.Headers {
 			if strings.EqualFold(k, "content-type") {
 				if ct, ok := v.(string); ok && ct != "" {
@@ -585,24 +587,21 @@ func crawlAndArchive(pageURL string, writer *warc.Writer, mu *sync.Mutex, domain
 			}
 		}
 
+		// Write records to WARC file
 		mu.Lock()
-		if _, err := writer.WriteRecord(origReqRec); err != nil {
-			log.Printf("Failed to write request record for redirect: %v", err)
-		}
-
-		if _, err := writer.WriteRecord(origRespRec); err != nil {
-			log.Printf("Failed to write response record for redirect: %v", err)
-		}
+		writer.WriteRecord(origReqRec)
+		writer.WriteRecord(origRespRec)
 		mu.Unlock()
 
+		// Clean up
 		origReqRec.Content.Close()
 		origRespRec.Content.Close()
 	}
 
+	// Deduplicate and return links
 	return deduplicateLinks(links), nil
 }
 
-// Helper function to deduplicate links
 func deduplicateLinks(links []string) []string {
 	seen := make(map[string]bool)
 	result := []string{}
