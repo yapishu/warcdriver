@@ -245,7 +245,7 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("produced crawl archive for %s at %s", req.URL, path)
+	log.Printf("produced crawl archive for %s at %s with %d pages", req.URL, path, len(urlsCrawled))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(crawlResponse{Path: filename, UrlsCrawled: urlsCrawled})
 }
@@ -321,9 +321,9 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 	domain := parsedURL.Hostname()
 	log.Printf("Starting crawl of domain %s with prefix %s", domain, prefix)
 
-	manager := NewCrawlManager(domain, prefix)
-	manager.AddURL(startURL)
+	visitedURLs := make(map[string]bool)
 	urlQueue := []string{startURL}
+	var crawledURLs []string
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -334,20 +334,13 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 	}
 	defer cancelAlloc()
 
-	sem := make(chan struct{}, 3)
-	var wg sync.WaitGroup
 	var pagesProcessed int32
 
-	for len(urlQueue) > 0 {
-		if atomic.LoadInt32(&pagesProcessed) >= int32(maxPages) {
-			log.Printf("Reached max page limit of %d", maxPages)
-			break
-		}
-
+	for len(urlQueue) > 0 && atomic.LoadInt32(&pagesProcessed) < int32(maxPages) {
 		currentURL := urlQueue[0]
 		urlQueue = urlQueue[1:]
 
-		if manager.IsResource(currentURL) {
+		if visitedURLs[currentURL] {
 			continue
 		}
 
@@ -356,82 +349,43 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 			break
 		}
 
-		wg.Add(1)
-		sem <- struct{}{}
+		visitedURLs[currentURL] = true
+		crawledURLs = append(crawledURLs, currentURL)
 
-		go func(url string, pageNum int32) {
-			defer wg.Done()
-			defer func() { <-sem }()
+		log.Printf("Crawling page %d/%d: %s", atomic.LoadInt32(&pagesProcessed), maxPages, currentURL)
 
-			log.Printf("Crawling page %d/%d: %s", pageNum, maxPages, url)
+		tabCtx, cancelTab := chromedp.NewContext(allocCtx)
+		var links []string
 
-			tabCtx, cancelTab := chromedp.NewContext(allocCtx)
-			defer cancelTab()
-
-			var links []string
-
-			err := chromedp.Run(tabCtx,
-				network.Enable(),
-				chromedp.Navigate(url),
-				chromedp.Sleep(2*time.Second),
-				chromedp.Evaluate(`
-                    Array.from(document.querySelectorAll('a[href]')).map(a => {
-                        try {
-                            return new URL(a.href, window.location.href).href;
-                        } catch(e) {
-                            return '';
-                        }
-                    }).filter(href => href !== '')
-                `, &links),
-			)
-
-			if err != nil {
-				log.Printf("Error crawling %s: %v", url, err)
-				return
-			}
-
-			var resources []string
-
-			_ = chromedp.Run(tabCtx,
-				chromedp.Evaluate(`
-                    [
-                        ...Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map(el => el.href),
-                        ...Array.from(document.querySelectorAll('script[src]')).map(el => el.src),
-                        ...Array.from(document.querySelectorAll('img[src]')).map(el => el.src)
-                    ].filter(url => url !== '')
-                `, &resources),
-			)
-
-			manager.Mutex.Lock()
-			for _, link := range links {
-				if manager.ShouldProcess(link) && !manager.AllURLs[link] {
-					manager.AllURLs[link] = true
-					if manager.IsResource(link) {
-						manager.ResourceURLs[link] = true
-					} else {
-						manager.ContentURLs[link] = true
-						if atomic.LoadInt32(&pagesProcessed) < int32(maxPages) {
-							urlQueue = append(urlQueue, link)
-						}
+		err := chromedp.Run(tabCtx,
+			network.Enable(),
+			chromedp.Navigate(currentURL),
+			chromedp.Sleep(2*time.Second),
+			chromedp.Evaluate(`
+				Array.from(document.querySelectorAll('a[href]')).map(a => {
+					try {
+						return new URL(a.href, window.location.href).href;
+					} catch(e) {
+						return '';
 					}
-				}
-			}
+				}).filter(href => href !== '')
+			`, &links),
+		)
+		cancelTab()
 
-			for _, res := range resources {
-				if manager.ShouldProcess(res) && !manager.AllURLs[res] {
-					manager.AllURLs[res] = true
-					manager.ResourceURLs[res] = true
-				}
+		if err != nil {
+			log.Printf("Error crawling %s: %v", currentURL, err)
+			continue
+		}
+
+		for _, link := range links {
+			if shouldCrawl(link, domain, prefix, visitedURLs) {
+				urlQueue = append(urlQueue, link)
 			}
-			manager.Mutex.Unlock()
-		}(currentURL, atomic.LoadInt32(&pagesProcessed))
+		}
 	}
 
-	wg.Wait()
-
-	urlsToArchive := manager.GetAllURLsToArchive()
-	log.Printf("Found %d URLs to archive (%d content, %d resources)",
-		len(urlsToArchive), len(manager.ContentURLs), len(manager.ResourceURLs))
+	log.Printf("Crawled %d pages, preparing to archive them", len(crawledURLs))
 
 	warcPath := filepath.Join(RootContentDir, filename)
 	if err := os.MkdirAll(filepath.Dir(warcPath), 0777); err != nil {
@@ -467,14 +421,12 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 
 	archiveSem := make(chan struct{}, 5)
 	var archiveWg sync.WaitGroup
+	var archivedCount int32
 
 	archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer archiveCancel()
 
-	var archivedCount int32
-	totalToArchive := len(urlsToArchive)
-
-	for _, urlToArchive := range urlsToArchive {
+	for _, urlToArchive := range crawledURLs {
 		select {
 		case <-archiveCtx.Done():
 			log.Printf("Archive timeout reached, stopping")
@@ -493,8 +445,8 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 				log.Printf("Error archiving %s: %v", urlStr, err)
 			} else {
 				count := atomic.AddInt32(&archivedCount, 1)
-				if count%10 == 0 {
-					log.Printf("Archived %d/%d URLs", count, totalToArchive)
+				if count%5 == 0 {
+					log.Printf("Archived %d/%d URLs", count, len(crawledURLs))
 				}
 			}
 		}(urlToArchive)
@@ -502,14 +454,54 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 
 FinishArchiving:
 	archiveWg.Wait()
-	log.Printf("Archived %d/%d URLs", atomic.LoadInt32(&archivedCount), totalToArchive)
+	log.Printf("Archived %d/%d URLs", atomic.LoadInt32(&archivedCount), len(crawledURLs))
 
-	var contentURLs []string
-	for url := range manager.ContentURLs {
-		contentURLs = append(contentURLs, url)
+	return warcPath, crawledURLs, nil
+}
+
+func shouldCrawl(linkURL string, domain string, prefix string, visitedURLs map[string]bool) bool {
+	parsedURL, err := url.Parse(linkURL)
+	if err != nil {
+		return false
 	}
 
-	return warcPath, contentURLs, nil
+	if !strings.Contains(parsedURL.Hostname(), domain) {
+		return false
+	}
+
+	if prefix != "" && !strings.HasPrefix(linkURL, prefix) {
+		return false
+	}
+
+	if visitedURLs[linkURL] {
+		return false
+	}
+
+	path := strings.ToLower(parsedURL.Path)
+	resourceExts := []string{
+		".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+		".woff", ".woff2", ".ttf", ".otf", ".eot", ".ico", ".pdf",
+		".mp3", ".mp4", ".webm", ".webp", ".json",
+	}
+
+	for _, ext := range resourceExts {
+		if strings.HasSuffix(path, ext) {
+			return false
+		}
+	}
+
+	resourceDirs := []string{
+		"/font/", "/fonts/", "/static/", "/assets/",
+		"/img/", "/images/", "/css/", "/js/", "/media/",
+	}
+
+	for _, dir := range resourceDirs {
+		if strings.Contains(path, dir) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
