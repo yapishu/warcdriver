@@ -574,14 +574,18 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 					rid := "<urn:uuid:" + uuid.NewString() + ">"
 
 					mu.Lock()
+					defer mu.Unlock()
 
 					reqRec := warc.NewRecord(os.TempDir(), false)
 					reqRec.Header.Set("WARC-Type", "request")
 					reqRec.Header.Set("WARC-Record-ID", rid)
 					reqRec.Header.Set("WARC-Target-URI", response.URL)
 					reqRec.Header.Set("WARC-Date", now)
+					reqRec.Header.Set("Content-Type", "application/http; msgtype=request")
 					reqRec.Content.Write(headersToHTTP(response.RequestHeaders, response.URL))
 					reqRec.Content.Seek(0, 0)
+					writer.WriteRecord(reqRec)
+					reqRec.Content.Close()
 
 					respRec := warc.NewRecord(os.TempDir(), false)
 					respRec.Header.Set("WARC-Type", "response")
@@ -590,24 +594,21 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 					respRec.Header.Set("WARC-Target-URI", response.URL)
 					respRec.Header.Set("WARC-Date", now)
 					respRec.Header.Set("Content-Type", "application/http; msgtype=response")
-					respRec.Content.Write(buildHTTPResp(response, body))
+					responseBlock := buildHTTPResp(response, body)
+					respRec.Content.Write(responseBlock)
 					respRec.Content.Seek(0, 0)
 
 					for k, v := range response.Headers {
 						if strings.EqualFold(k, "content-type") {
 							if ct, ok := v.(string); ok && ct != "" {
-								respRec.Header.Set("Content-Type", ct)
+								respRec.Header.Set("WARC-Identified-Payload-Type", ct)
 							}
 							break
 						}
 					}
 
 					respRec.Content.Seek(0, 0)
-					writer.WriteRecord(reqRec)
 					writer.WriteRecord(respRec)
-					mu.Unlock()
-
-					reqRec.Content.Close()
 					respRec.Content.Close()
 				}(e.RequestID, resp)
 				delete(responses, e.RequestID)
@@ -626,16 +627,18 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 	wg.Wait()
 
 	if finalURL != "" && finalURL != urlInput && documentResponse != nil && documentBody != nil {
+		mu.Lock()
+		defer mu.Unlock()
+
 		now := time.Now().UTC().Format(time.RFC3339)
 		origReqID := "<urn:uuid:" + uuid.NewString() + ">"
-
-		mu.Lock()
 
 		origReqRec := warc.NewRecord(os.TempDir(), false)
 		origReqRec.Header.Set("WARC-Type", "request")
 		origReqRec.Header.Set("WARC-Record-ID", origReqID)
 		origReqRec.Header.Set("WARC-Target-URI", urlInput)
 		origReqRec.Header.Set("WARC-Date", now)
+		origReqRec.Header.Set("Content-Type", "application/http; msgtype=request")
 
 		fakeReqHeaders := make(network.Headers)
 		for k, v := range documentResponse.RequestHeaders {
@@ -644,6 +647,8 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 
 		origReqRec.Content.Write(headersToHTTP(fakeReqHeaders, urlInput))
 		origReqRec.Content.Seek(0, 0)
+		writer.WriteRecord(origReqRec)
+		origReqRec.Content.Close()
 
 		origRespRec := warc.NewRecord(os.TempDir(), false)
 		origRespRec.Header.Set("WARC-Type", "response")
@@ -666,15 +671,15 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 		for k, v := range documentResponse.Headers {
 			if strings.EqualFold(k, "content-type") {
 				if ct, ok := v.(string); ok && ct != "" {
-					origRespRec.Header.Set("Content-Type", ct)
+					origRespRec.Header.Set("WARC-Identified-Payload-Type", ct)
 				}
 				break
 			}
 		}
 
 		origRespRec.Content.Seek(0, 0)
-		writer.WriteRecord(origReqRec)
 		writer.WriteRecord(origRespRec)
+		origRespRec.Content.Close()
 
 		metaRec := warc.NewRecord(os.TempDir(), false)
 		metaRec.Header.Set("WARC-Type", "metadata")
@@ -691,21 +696,7 @@ func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
 		metaRec.Content.Write(metaContent.Bytes())
 		metaRec.Content.Seek(0, 0)
 		writer.WriteRecord(metaRec)
-		mu.Unlock()
-
-		origReqRec.Content.Close()
-		origRespRec.Content.Close()
 		metaRec.Content.Close()
-	} else {
-		mu.Lock()
-		if _, err := writer.WriteInfoRecord(map[string]string{
-			"software": "warcdriver",
-			"format":   "WARC/1.1",
-		}); err != nil {
-			mu.Unlock()
-			return err
-		}
-		mu.Unlock()
 	}
 
 	return nil
