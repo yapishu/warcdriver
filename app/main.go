@@ -226,7 +226,6 @@ func handleCrawl(w http.ResponseWriter, r *http.Request) {
 
 	prefix := req.Prefix
 
-	// extract domain from URL and generate filename
 	parsedURL, err := url.Parse(req.URL)
 	if err != nil {
 		log.Printf("invalid URL: %v", err)
@@ -313,66 +312,50 @@ func archiveURLs(urls []string, filename string) (string, error) {
 	return warcPath, nil
 }
 
-func crawlSubdomain(startURL string, filename string, maxPages int, prefix string) ([]byte, []string, error) {
+func crawlSubdomain(startURL string, filename string, maxPages int, prefix string) (string, []string, error) {
 	parsedURL, err := url.Parse(startURL)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 
 	domain := parsedURL.Hostname()
 	log.Printf("Starting crawl of domain %s with prefix %s", domain, prefix)
 
-	// Create the crawl manager
 	manager := NewCrawlManager(domain, prefix)
-
-	// Add the start URL
 	manager.AddURL(startURL)
-
-	// Create a queue for BFS crawling
 	urlQueue := []string{startURL}
 
-	// Create Chrome context for crawling
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	allocCtx, cancelAlloc, err := remoteAllocator(ctx)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 	defer cancelAlloc()
 
-	// Limit concurrent crawlers
-	sem := make(chan struct{}, 3) // Reduce concurrency to 3
+	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
-
-	// Use atomic counter for tracking pages
 	var pagesProcessed int32
 
-	// Process queue until maxPages or queue is empty
 	for len(urlQueue) > 0 {
-		// Check if we've hit the limit
 		if atomic.LoadInt32(&pagesProcessed) >= int32(maxPages) {
 			log.Printf("Reached max page limit of %d", maxPages)
 			break
 		}
 
-		// Get next URL to process
 		currentURL := urlQueue[0]
 		urlQueue = urlQueue[1:]
 
-		// Skip resources during crawling phase
 		if manager.IsResource(currentURL) {
 			continue
 		}
 
-		// Increment counter BEFORE processing
 		if atomic.AddInt32(&pagesProcessed, 1) > int32(maxPages) {
-			// We've exceeded the limit
-			atomic.AddInt32(&pagesProcessed, -1) // Decrement back
+			atomic.AddInt32(&pagesProcessed, -1)
 			break
 		}
 
-		// Process the URL
 		wg.Add(1)
 		sem <- struct{}{}
 
@@ -382,7 +365,6 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 
 			log.Printf("Crawling page %d/%d: %s", pageNum, maxPages, url)
 
-			// Create a new browser context for each page
 			tabCtx, cancelTab := chromedp.NewContext(allocCtx)
 			defer cancelTab()
 
@@ -408,7 +390,6 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 				return
 			}
 
-			// Also collect resource URLs
 			var resources []string
 
 			_ = chromedp.Run(tabCtx,
@@ -421,7 +402,6 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
                 `, &resources),
 			)
 
-			// Process found links, but check page limit
 			manager.Mutex.Lock()
 			for _, link := range links {
 				if manager.ShouldProcess(link) && !manager.AllURLs[link] {
@@ -430,7 +410,6 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 						manager.ResourceURLs[link] = true
 					} else {
 						manager.ContentURLs[link] = true
-						// Only add to queue if we haven't reached the limit
 						if atomic.LoadInt32(&pagesProcessed) < int32(maxPages) {
 							urlQueue = append(urlQueue, link)
 						}
@@ -438,7 +417,6 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 				}
 			}
 
-			// Process all resources
 			for _, res := range resources {
 				if manager.ShouldProcess(res) && !manager.AllURLs[res] {
 					manager.AllURLs[res] = true
@@ -449,29 +427,23 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 		}(currentURL, atomic.LoadInt32(&pagesProcessed))
 	}
 
-	// Wait for all crawlers to finish
 	wg.Wait()
 
-	// Get URLs to archive - limit to max pages worth of content
 	urlsToArchive := manager.GetAllURLsToArchive()
 	log.Printf("Found %d URLs to archive (%d content, %d resources)",
 		len(urlsToArchive), len(manager.ContentURLs), len(manager.ResourceURLs))
 
-	// Now archive all URLs
-	tempDir, err := os.MkdirTemp("", "warc-*")
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create temp dir: %w", err)
+	warcPath := filepath.Join(RootContentDir, filename)
+	if err := os.MkdirAll(filepath.Dir(warcPath), 0777); err != nil {
+		return "", nil, fmt.Errorf("failed to create directory: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
-
-	warcPath := filepath.Join(tempDir, filename)
 	f, err := os.Create(warcPath)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, fmt.Errorf("failed to create file: %w", err)
 	}
 	defer f.Close()
 
-	isGz := false
+	isGz := strings.HasSuffix(filename, ".gz")
 	writer, err := warc.NewWriter(
 		f,
 		filepath.Base(warcPath),
@@ -481,38 +453,33 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 		nil,
 	)
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 
-	// Write WARC info record
 	var mu sync.Mutex
 	if _, err := writer.WriteInfoRecord(map[string]string{
 		"software":   "warcdriver",
 		"format":     "WARC/1.1",
 		"crawl-time": time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 
-	// Archive each URL - with a timeout to ensure we don't wait forever
 	archiveSem := make(chan struct{}, 5)
 	var archiveWg sync.WaitGroup
 
 	archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer archiveCancel()
 
-	// Add a counter for archiving progress
 	var archivedCount int32
 	totalToArchive := len(urlsToArchive)
 
 	for _, urlToArchive := range urlsToArchive {
-		// Check for context timeout
 		select {
 		case <-archiveCtx.Done():
 			log.Printf("Archive timeout reached, stopping")
 			goto FinishArchiving
 		default:
-			// Continue processing
 		}
 
 		archiveWg.Add(1)
@@ -522,7 +489,6 @@ func crawlSubdomain(startURL string, filename string, maxPages int, prefix strin
 			defer archiveWg.Done()
 			defer func() { <-archiveSem }()
 
-			// Skip archiving if there's an error
 			if err := archiveUrl(urlStr, writer, &mu); err != nil {
 				log.Printf("Error archiving %s: %v", urlStr, err)
 			} else {
@@ -538,20 +504,12 @@ FinishArchiving:
 	archiveWg.Wait()
 	log.Printf("Archived %d/%d URLs", atomic.LoadInt32(&archivedCount), totalToArchive)
 
-	// Close the file and read it
-	f.Close()
-	content, err := os.ReadFile(warcPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read WARC file: %w", err)
-	}
-
-	// Make sure we only return the URLs we crawled as content pages
 	var contentURLs []string
 	for url := range manager.ContentURLs {
 		contentURLs = append(contentURLs, url)
 	}
 
-	return content, contentURLs, nil
+	return warcPath, contentURLs, nil
 }
 
 func archiveUrl(urlInput string, writer *warc.Writer, mu *sync.Mutex) error {
@@ -786,25 +744,6 @@ func buildHTTPResp(resp *network.Response, body []byte) []byte {
 	b.WriteString("\r\n")
 	b.Write(body)
 	return b.Bytes()
-}
-
-func writeHdrs(b *bytes.Buffer, h network.Headers) {
-	for k, v := range h {
-		if strings.HasPrefix(k, ":") {
-			continue
-		}
-		switch vv := v.(type) {
-		case string:
-			fmt.Fprintf(b, "%s: %s\r\n", k, vv)
-		case []string:
-			for _, s := range vv {
-				fmt.Fprintf(b, "%s: %s\r\n", k, s)
-			}
-		default:
-			fmt.Fprintf(b, "%s: %v\r\n", k, vv)
-		}
-	}
-	b.WriteString("\r\n")
 }
 
 func remoteAllocator(ctx context.Context) (context.Context, context.CancelFunc, error) {
