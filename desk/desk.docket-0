@@ -1,0 +1,9 @@
+:~
+  title+'WARC'
+  info+'Save web pages as WARC archives'
+  color+0x6e.7bf2
+  site+/apps/warc
+  version+[0 1 0]
+  website+''
+  license+'MIT'
+==

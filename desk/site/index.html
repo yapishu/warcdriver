@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WARC</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>WARC</h1>
+    <nav>
+      <button class="tab active" data-tab="archive">Archive</button>
+      <button class="tab" data-tab="bookmarks">Bookmarks</button>
+    </nav>
+  </header>
+  <main>
+    <section id="archive" class="panel active">
+      <form id="archive-form">
+        <label for="url-input">URL to archive</label>
+        <input type="url" id="url-input" placeholder="https://example.com/article" required>
+        <label for="title-input">Title (optional, auto-detected)</label>
+        <input type="text" id="title-input" placeholder="Page title">
+        <label for="tags-input">Tags (comma-separated)</label>
+        <input type="text" id="tags-input" placeholder="blog, reference, tutorial">
+        <button type="submit" id="archive-btn">Archive</button>
+      </form>
+      <div id="archive-status" class="status" hidden></div>
+      <div id="archive-progress" hidden>
+        <div class="progress-bar"><div class="progress-fill"></div></div>
+        <p class="progress-text"></p>
+      </div>
+    </section>
+    <section id="bookmarks" class="panel">
+      <div class="search-bar">
+        <input type="text" id="search-input" placeholder="Search by URL, title, or tag...">
+      </div>
+      <div class="tag-filter" id="tag-filter"></div>
+      <div id="bookmark-list"></div>
+    </section>
+  </main>
+  <script src="warc.js"></script>
+</body>
+</html>
