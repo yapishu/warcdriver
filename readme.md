@@ -2,6 +2,8 @@
 
 A personal web archiver for Urbit. Save snapshots of web pages as standards-compliant WARC 1.1 files and upload them to S3.
 
+<img width="1036" height="498" alt="image" src="https://github.com/user-attachments/assets/98bd3e4d-a496-4a6e-98cf-a774d1e151e0" />
+
 ## Background
 
 The original version of this app was a Go backend (`app/`) that used Chrome DevTools Protocol via chromedp to capture full-fidelity page archives, including a BFS crawler for same-domain link discovery. The Go server produced individually gzipped WARC records and handled page rendering, subresource capture, and WARC serialization server-side.
