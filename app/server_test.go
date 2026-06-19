@@ -1,0 +1,55 @@
+package main
+
+import (
+	"testing"
+
+	"warcdrive/internal/api"
+)
+
+func TestNormalizeArchiveJobDefaultSinglePageDepthZero(t *testing.T) {
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/"}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "single_page" || got.Depth != 0 {
+		t.Fatalf("scope/depth = %s/%d, want single_page/0", got.Scope, got.Depth)
+	}
+}
+
+func TestNormalizeArchiveJobDepthWithoutScopePromotesLinkedPages(t *testing.T) {
+	depth := 2
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", Depth: &depth}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "linked_pages" || got.Depth != 2 {
+		t.Fatalf("scope/depth = %s/%d, want linked_pages/2", got.Scope, got.Depth)
+	}
+}
+
+func TestNormalizeArchiveJobExplicitSinglePageIgnoresDepth(t *testing.T) {
+	depth := 2
+	scope := api.SinglePage
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", Scope: &scope, Depth: &depth}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "single_page" || got.Depth != 0 {
+		t.Fatalf("scope/depth = %s/%d, want single_page/0", got.Scope, got.Depth)
+	}
+}
+
+func TestNormalizeArchiveJobSubdomainDefaultsToAllDepth(t *testing.T) {
+	scope := api.ArchiveScope("same_subdomain")
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", Scope: &scope}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "same_subdomain" || got.Depth != -1 {
+		t.Fatalf("scope/depth = %s/%d, want same_subdomain/-1", got.Scope, got.Depth)
+	}
+}

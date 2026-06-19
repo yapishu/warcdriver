@@ -1,0 +1,218 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestCaptureArchiveWithBrowsertrixImportsWorkerResult(t *testing.T) {
+	app := &App{dataDir: t.TempDir()}
+	jobID := "browsertrix-test-job"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		jobDir := app.browsertrixJobDir(jobID)
+		for {
+			if fileExists(filepath.Join(jobDir, "queued")) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		_ = os.Rename(filepath.Join(jobDir, "queued"), filepath.Join(jobDir, "running"))
+		_ = os.WriteFile(filepath.Join(jobDir, "cookie-profile.tar.gz"), []byte("secret profile"), 0o600)
+		_ = os.WriteFile(filepath.Join(jobDir, "browsertrix.log"), []byte(`{"timestamp":"2026-06-19T00:00:00Z","logLevel":"info","context":"general","message":"Crawling done","details":{}}`+"\n"), 0o644)
+
+		collectionDir := filepath.Join(app.dataDir, "browsertrix", "runs", "collections", jobID)
+		pagesDir := filepath.Join(collectionDir, "pages")
+		_ = os.MkdirAll(pagesDir, 0o755)
+		pages := `{"format":"json-pages-1.0","id":"pages","title":"Seed Pages","hasText":"true"}` + "\n" +
+			`{"id":"p1","url":"https://example.com/","title":"Example Domain","mime":"text/html","status":200,"seed":true,"depth":0,"text":"Example text"}` + "\n"
+		_ = os.WriteFile(filepath.Join(pagesDir, "pages.jsonl"), []byte(pages), 0o644)
+		extraPages := `{"format":"json-pages-1.0","id":"pages","title":"Non-Seed Pages","hasText":"true"}` + "\n" +
+			`{"id":"p2","url":"https://example.com/linked","title":"Linked Page","mime":"text/html","status":200,"depth":1,"text":"Linked text"}` + "\n" +
+			`{"id":"p3","url":"https://example.com/rate-limited","title":"","mime":"text/plain","status":429,"depth":1,"text":""}` + "\n"
+		_ = os.WriteFile(filepath.Join(pagesDir, "extraPages.jsonl"), []byte(extraPages), 0o644)
+		_ = os.WriteFile(filepath.Join(collectionDir, jobID+".wacz"), []byte("fake-wacz"), 0o644)
+		_ = os.Remove(filepath.Join(jobDir, "running"))
+		_ = os.WriteFile(filepath.Join(jobDir, "done.json"), []byte(`{"status":"succeeded","exitCode":0}`), 0o644)
+	}()
+
+	var logs []string
+	result, err := app.captureArchiveWithBrowsertrix(ctx, BrowsertrixCaptureOptions{
+		JobID:    jobID,
+		StartURL: "https://example.com/",
+		Scope:    "single_page",
+		Depth:    0,
+		MaxPages: 1,
+		Cookies: []browserCookieData{
+			{Name: "session", Value: "secret", URL: "https://example.com/"},
+		},
+		OnLog: func(level, message string) {
+			logs = append(logs, level+": "+message)
+		},
+	})
+	if err != nil {
+		t.Fatalf("captureArchiveWithBrowsertrix returned error: %v", err)
+	}
+	if result.WARCPath != filepath.Join(app.dataDir, "browsertrix", "runs", "collections", jobID, jobID+".wacz") {
+		t.Fatalf("unexpected archive path: %s", result.WARCPath)
+	}
+	if len(result.Pages) != 2 {
+		t.Fatalf("expected 2 indexed pages, got %d: %+v", len(result.Pages), result.Pages)
+	}
+	if result.Pages[0].Title != "Example Domain" || result.Pages[0].Markdown == "" {
+		t.Fatalf("unexpected page import: %+v", result.Pages[0])
+	}
+	if result.Pages[1].Title != "Linked Page" || result.Pages[1].Depth != 1 {
+		t.Fatalf("unexpected linked page import: %+v", result.Pages[1])
+	}
+	for _, page := range result.Pages {
+		if strings.Contains(page.URL, "rate-limited") {
+			t.Fatalf("failed extra page should not be indexed: %+v", page)
+		}
+	}
+	if len(logs) == 0 {
+		t.Fatal("expected Browsertrix logs to be streamed")
+	}
+	if fileExists(filepath.Join(app.browsertrixJobDir(jobID), "cookies.json")) {
+		t.Fatal("cookies.json should be removed after capture")
+	}
+	if fileExists(filepath.Join(app.browsertrixJobDir(jobID), "cookie-profile.tar.gz")) {
+		t.Fatal("cookie-profile.tar.gz should be removed after capture")
+	}
+}
+
+func TestCaptureArchiveWithBrowsertrixPreservesUnlimitedSubdomainDepth(t *testing.T) {
+	app := &App{dataDir: t.TempDir()}
+	jobID := "browsertrix-unlimited-depth"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	configCh := make(chan map[string]any, 1)
+
+	go func() {
+		jobDir := app.browsertrixJobDir(jobID)
+		for {
+			if fileExists(filepath.Join(jobDir, "queued")) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		b, err := os.ReadFile(filepath.Join(jobDir, "config.json"))
+		if err == nil {
+			var cfg map[string]any
+			if json.Unmarshal(b, &cfg) == nil {
+				configCh <- cfg
+			}
+		}
+		_ = os.Rename(filepath.Join(jobDir, "queued"), filepath.Join(jobDir, "running"))
+
+		collectionDir := app.browsertrixCollectionDir(jobID)
+		pagesDir := filepath.Join(collectionDir, "pages")
+		_ = os.MkdirAll(pagesDir, 0o755)
+		pages := `{"format":"json-pages-1.0","id":"pages","title":"Seed Pages","hasText":"true"}` + "\n" +
+			`{"id":"p1","url":"https://example.com/","title":"Example Domain","mime":"text/html","status":200,"seed":true,"depth":0,"text":"Example text"}` + "\n"
+		_ = os.WriteFile(filepath.Join(pagesDir, "pages.jsonl"), []byte(pages), 0o644)
+		_ = os.WriteFile(filepath.Join(collectionDir, jobID+".wacz"), []byte("fake-wacz"), 0o644)
+		_ = os.Remove(filepath.Join(jobDir, "running"))
+		_ = os.WriteFile(filepath.Join(jobDir, "done.json"), []byte(`{"status":"succeeded","exitCode":0}`), 0o644)
+	}()
+
+	_, err := app.captureArchiveWithBrowsertrix(ctx, BrowsertrixCaptureOptions{
+		JobID:    jobID,
+		StartURL: "https://example.com/",
+		Scope:    "same_subdomain",
+		Depth:    -1,
+		MaxPages: 5,
+	})
+	if err != nil {
+		t.Fatalf("captureArchiveWithBrowsertrix returned error: %v", err)
+	}
+	select {
+	case cfg := <-configCh:
+		if cfg["depth"] != float64(-1) || cfg["scopeType"] != "host" {
+			t.Fatalf("depth/scopeType = %v/%v, want -1/host", cfg["depth"], cfg["scopeType"])
+		}
+	default:
+		t.Fatal("worker did not observe Browsertrix config")
+	}
+}
+
+func TestParseBrowsertrixLogLineBlockedRequest(t *testing.T) {
+	line := `{"timestamp":"2026-06-19T00:00:00Z","logLevel":"warn","context":"recorder","message":"Request failed","details":{"url":"https://browser-intake-datadoghq.com/api/v2/rum?application_id=abc&session=def","page":"https://eventsinukraine.substack.com/p/infowars","type":"Fetch","errorText":"net::ERR_BLOCKED_BY_CLIENT.Inspector"}}`
+	level, msg := parseBrowsertrixLogLine(line)
+	if level != "debug" {
+		t.Fatalf("level = %q, want debug", level)
+	}
+	if !strings.Contains(msg, "blocked request [Fetch] https://browser-intake-datadoghq.com") {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+	if strings.Contains(msg, "eventsinukraine.substack.com/p/infowars") {
+		t.Fatalf("blocked subresource log should not read like the page failed: %q", msg)
+	}
+}
+
+func TestParseBrowsertrixLogLineFailedRequest(t *testing.T) {
+	line := `{"timestamp":"2026-06-19T00:00:00Z","logLevel":"warn","context":"recorder","message":"Request failed","details":{"url":"https://cdn.example.com/image.png","page":"https://example.com/post","type":"Image","errorText":"net::ERR_CONNECTION_RESET"}}`
+	level, msg := parseBrowsertrixLogLine(line)
+	if level != "warn" {
+		t.Fatalf("level = %q, want warn", level)
+	}
+	if !strings.Contains(msg, "request failed [Image] https://cdn.example.com/image.png: net::ERR_CONNECTION_RESET on https://example.com/post") {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+}
+
+func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
+	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
+		JobID:    "linked-pages",
+		StartURL: "https://example.com/",
+		Scope:    "linked_pages",
+		Depth:    2,
+		MaxPages: 25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["scopeType"] != "any" || cfg["depth"] != 2 {
+		t.Fatalf("scopeType/depth = %v/%v, want any/2", cfg["scopeType"], cfg["depth"])
+	}
+	if cfg["failOnInvalidStatus"] != true || cfg["maxPageRetries"] != 3 || cfg["pageExtraDelay"] != 5 {
+		t.Fatalf("retry/delay config = failOnInvalidStatus:%v maxPageRetries:%v pageExtraDelay:%v", cfg["failOnInvalidStatus"], cfg["maxPageRetries"], cfg["pageExtraDelay"])
+	}
+	exclude, ok := cfg["scopeExcludeRx"].(string)
+	if !ok || !strings.Contains(exclude, "webp") || !strings.Contains(exclude, "pdf") {
+		t.Fatalf("missing static asset page exclusion regex: %v", cfg["scopeExcludeRx"])
+	}
+}
+
+func TestBrowsertrixConfigSubdomainAllowsUnlimitedDepth(t *testing.T) {
+	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
+		JobID:    "subdomain",
+		StartURL: "https://example.com/",
+		Scope:    "same_subdomain",
+		Depth:    -1,
+		MaxPages: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["scopeType"] != "host" || cfg["depth"] != -1 {
+		t.Fatalf("scopeType/depth = %v/%v, want host/-1", cfg["scopeType"], cfg["depth"])
+	}
+}

@@ -1,0 +1,684 @@
+openapi: 3.0.3
+info:
+  title: WARCdriver API
+  version: 0.1.0
+  description: API for authenticated personal web archiving, catalog browsing, and WARC replay.
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+  - sessionCookie: []
+paths:
+  /api/auth/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Logged in user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/auth/logout:
+    post:
+      operationId: logout
+      responses:
+        "204":
+          description: Logged out
+  /api/me:
+    get:
+      operationId: getMe
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/archive-jobs:
+    post:
+      operationId: createArchiveJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateArchiveJobRequest"
+      responses:
+        "202":
+          description: Archive job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchiveJob"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+    get:
+      operationId: listArchiveJobs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Archive jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs]
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ArchiveJob"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/archive-jobs/{id}:
+    get:
+      operationId: getArchiveJob
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Archive job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchiveJobDetail"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteArchiveJob
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/archive-jobs/{id}/cancel:
+    post:
+      operationId: cancelArchiveJob
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Canceled archive job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchiveJob"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/sites:
+    get:
+      operationId: listSites
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          description: Sites
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sites]
+                properties:
+                  sites:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Site"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/sites/{id}:
+    get:
+      operationId: getSite
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Site with recent items
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDetail"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSite
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: siteId
+          in: query
+          schema:
+            type: string
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          description: Items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Item"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/items/{id}:
+    get:
+      operationId: getItem
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Item detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemDetail"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteItem
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/warcs/{id}/download:
+    get:
+      operationId: downloadWarc
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: WARC file
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/warcs/{id}/metadata:
+    get:
+      operationId: getWarcMetadata
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: WARC capture metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WarcMetadata"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/settings:
+    get:
+      operationId: getSettings
+      responses:
+        "200":
+          description: Service settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "401":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSettingsRequest"
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/settings/openrouter/test:
+    post:
+      operationId: testOpenRouter
+      responses:
+        "200":
+          description: OpenRouter status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, message]
+                properties:
+                  ok:
+                    type: boolean
+                  message:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/cookie-profiles:
+    get:
+      operationId: listCookieProfiles
+      responses:
+        "200":
+          description: Cookie profiles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profiles]
+                properties:
+                  profiles:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CookieProfile"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createCookieProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCookieProfileRequest"
+      responses:
+        "201":
+          description: Cookie profile created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CookieProfile"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/cookie-profiles/{id}:
+    delete:
+      operationId: deleteCookieProfile
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: api-token
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: warcdriver_session
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 1
+    MeResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+    User:
+      type: object
+      required: [id, username, displayName, createdAt]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    ArchiveScope:
+      type: string
+      enum: [single_page, linked_pages, same_subdomain, prefix, explicit_urls]
+    CreateArchiveJobRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+        urls:
+          type: array
+          items:
+            type: string
+            format: uri
+        scope:
+          allOf:
+            - $ref: "#/components/schemas/ArchiveScope"
+          default: single_page
+        depth:
+          type: integer
+          minimum: -1
+          maximum: 5
+          default: 0
+        maxPages:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 100
+        prefix:
+          type: string
+          format: uri
+        cookieProfileId:
+          type: string
+        enrich:
+          type: boolean
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled]
+    ArchiveJob:
+      type: object
+      required: [id, url, scope, depth, maxPages, status, createdAt]
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+        scope:
+          $ref: "#/components/schemas/ArchiveScope"
+        depth:
+          type: integer
+        maxPages:
+          type: integer
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        statusMessage:
+          type: string
+        error:
+          type: string
+        captureId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    ArchiveJobDetail:
+      allOf:
+        - $ref: "#/components/schemas/ArchiveJob"
+        - type: object
+          required: [logs]
+          properties:
+            logs:
+              type: array
+              items:
+                $ref: "#/components/schemas/JobLog"
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/Item"
+    JobLog:
+      type: object
+      required: [at, level, message]
+      properties:
+        at:
+          type: string
+          format: date-time
+        level:
+          type: string
+        message:
+          type: string
+    Site:
+      type: object
+      required: [id, host, itemCount, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        host:
+          type: string
+        title:
+          type: string
+        itemCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SiteDetail:
+      type: object
+      required: [site, items]
+      properties:
+        site:
+          $ref: "#/components/schemas/Site"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Item"
+    Item:
+      type: object
+      required: [id, siteId, captureId, url, title, depth, createdAt]
+      properties:
+        id:
+          type: string
+        siteId:
+          type: string
+        captureId:
+          type: string
+        url:
+          type: string
+        canonicalUrl:
+          type: string
+        title:
+          type: string
+        summary:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        depth:
+          type: integer
+        statusCode:
+          type: integer
+        contentType:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    ItemDetail:
+      allOf:
+        - $ref: "#/components/schemas/Item"
+        - type: object
+          properties:
+            markdown:
+              type: string
+            warcDownloadUrl:
+              type: string
+            replayUrl:
+              type: string
+    WarcMetadata:
+      type: object
+      required: [captureId, startUrl, createdAt]
+      properties:
+        captureId:
+          type: string
+        startUrl:
+          type: string
+        title:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    Settings:
+      type: object
+      required: [openRouterModel, enrichmentEnabled, filterLists]
+      properties:
+        openRouterModel:
+          type: string
+        openRouterApiKeyConfigured:
+          type: boolean
+        enrichmentEnabled:
+          type: boolean
+        filterLists:
+          type: array
+          items:
+            type: string
+        userAgent:
+          type: string
+    UpdateSettingsRequest:
+      type: object
+      properties:
+        openRouterApiKey:
+          type: string
+        openRouterModel:
+          type: string
+        enrichmentEnabled:
+          type: boolean
+        filterLists:
+          type: array
+          items:
+            type: string
+        userAgent:
+          type: string
+    CookieProfileSourceType:
+      type: string
+      enum: [raw_header, netscape, json]
+    CookieProfile:
+      type: object
+      required: [id, name, sourceType, createdAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        sourceType:
+          $ref: "#/components/schemas/CookieProfileSourceType"
+        host:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    CreateCookieProfileRequest:
+      type: object
+      required: [name, sourceType]
+      properties:
+        name:
+          type: string
+        sourceType:
+          $ref: "#/components/schemas/CookieProfileSourceType"
+        host:
+          type: string
+        cookieHeader:
+          type: string
+        content:
+          type: string

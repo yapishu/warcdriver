@@ -1,0 +1,13 @@
+export PUID="$(id -u)"
+export PGID="$(id -g)"
+export WARC_ADMIN_USERNAME=reid
+export WARC_ADMIN_EMAIL=
+export WARC_ADMIN_PASSWORD="choose-a-real-password"
+export DATA_DIR=/data
+export WARC_ADMIN_NAME=
+export WARC_API_TOKEN=example-api0-key
+export OPENROUTER_API_KEY=sk-or-example
+export OPENROUTER_MODEL=minimax/minimax-m3
+export COOKIE_SECURE=auto
+export BROWSERTRIX_PROFILE_PATH=
+export CAPTURE_USER_AGENT=
