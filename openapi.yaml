@@ -467,9 +467,10 @@ components:
           default: 0
         maxPages:
           type: integer
-          minimum: 1
+          minimum: 0
           maximum: 1000
           default: 100
+          description: Maximum number of pages to capture. Use 0 for unlimited.
         prefix:
           type: string
           format: uri

@@ -670,8 +670,8 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 	if depth < -1 || depth > 5 {
 		return ArchiveJobCreate{}, fmt.Errorf("depth must be between -1 and 5")
 	}
-	if maxPages < 1 || maxPages > 1000 {
-		return ArchiveJobCreate{}, fmt.Errorf("maxPages must be between 1 and 1000")
+	if maxPages < 0 || maxPages > 1000 {
+		return ArchiveJobCreate{}, fmt.Errorf("maxPages must be between 0 and 1000; use 0 for unlimited")
 	}
 	return ArchiveJobCreate{
 		URL:             req.Url,

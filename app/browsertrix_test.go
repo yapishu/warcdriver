@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,12 @@ func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
 	if !ok || !strings.Contains(exclude, "webp") || !strings.Contains(exclude, "pdf") {
 		t.Fatalf("missing static asset page exclusion regex: %v", cfg["scopeExcludeRx"])
 	}
+	if strings.Contains(exclude, "(?i)") {
+		t.Fatalf("Browsertrix uses JavaScript regexes; inline flags are invalid: %s", exclude)
+	}
+	if _, err := regexp.Compile(exclude); err != nil {
+		t.Fatalf("scopeExcludeRx should compile: %v", err)
+	}
 }
 
 func TestBrowsertrixConfigSubdomainAllowsUnlimitedDepth(t *testing.T) {
@@ -207,12 +214,29 @@ func TestBrowsertrixConfigSubdomainAllowsUnlimitedDepth(t *testing.T) {
 		StartURL: "https://example.com/",
 		Scope:    "same_subdomain",
 		Depth:    -1,
-		MaxPages: 100,
+		MaxPages: 0,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg["scopeType"] != "host" || cfg["depth"] != -1 {
 		t.Fatalf("scopeType/depth = %v/%v, want host/-1", cfg["scopeType"], cfg["depth"])
+	}
+	if _, ok := cfg["pageLimit"]; ok {
+		t.Fatalf("pageLimit should be omitted for unlimited captures: %v", cfg["pageLimit"])
+	}
+	if _, ok := cfg["maxPageLimit"]; ok {
+		t.Fatalf("maxPageLimit should be omitted for unlimited captures: %v", cfg["maxPageLimit"])
+	}
+}
+
+func TestParseBrowsertrixLogLineIncludesGeneralErrorDetail(t *testing.T) {
+	line := `{"timestamp":"2026-06-19T00:00:00Z","logLevel":"error","context":"general","message":"Failed to create seed","details":{"error":"SyntaxError: Invalid regular expression"}}`
+	level, msg := parseBrowsertrixLogLine(line)
+	if level != "error" {
+		t.Fatalf("level = %q, want error", level)
+	}
+	if !strings.Contains(msg, "Failed to create seed: SyntaxError: Invalid regular expression") {
+		t.Fatalf("unexpected message: %q", msg)
 	}
 }

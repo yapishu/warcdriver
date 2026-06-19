@@ -61,9 +61,6 @@ func (a *App) captureArchiveWithBrowsertrix(ctx context.Context, opts Browsertri
 	if opts.JobID == "" {
 		return nil, fmt.Errorf("missing Browsertrix job id")
 	}
-	if opts.MaxPages <= 0 {
-		opts.MaxPages = 100
-	}
 	if opts.Depth < 0 && opts.Scope != "same_subdomain" && opts.Scope != "prefix" {
 		opts.Depth = 0
 	}
@@ -112,7 +109,11 @@ func (a *App) captureArchiveWithBrowsertrix(ctx context.Context, opts Browsertri
 	}
 
 	logLineFunc(opts.OnLog, "info", "Browsertrix job queued for sidecar worker")
-	waitCtx, cancel := context.WithTimeout(ctx, captureTimeout(opts.MaxPages)+2*time.Minute)
+	waitCtx := ctx
+	cancel := func() {}
+	if opts.MaxPages > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, captureTimeout(opts.MaxPages)+2*time.Minute)
+	}
 	defer cancel()
 
 	var logOffset int64
@@ -175,8 +176,6 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 		"workers":             1,
 		"scopeType":           scopeType,
 		"depth":               depth,
-		"pageLimit":           opts.MaxPages,
-		"maxPageLimit":        opts.MaxPages,
 		"pageLoadTimeout":     90,
 		"waitUntil":           []string{"load", "networkidle2"},
 		"netIdleWait":         2,
@@ -191,6 +190,10 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 		"logLevel":            []string{"info", "warn", "error"},
 		"warcPrefix":          opts.JobID,
 		"title":               firstNonEmpty(hostFromURL(opts.StartURL), opts.StartURL),
+	}
+	if opts.MaxPages > 0 {
+		config["pageLimit"] = opts.MaxPages
+		config["maxPageLimit"] = opts.MaxPages
 	}
 	if include != "" {
 		config["scopeIncludeRx"] = include
@@ -268,7 +271,7 @@ func browsertrixScope(opts BrowsertrixCaptureOptions) (scopeType, include string
 }
 
 func browsertrixPageExcludeRx() string {
-	return `(?i)\.(?:avif|bmp|css|eot|gif|gz|ico|jpe?g|js|json|m4v|map|mov|mp3|mp4|otf|pdf|png|rss|svg|tar|ttf|webm|webp|woff2?|xml|zip)(?:[?#].*)?$`
+	return `\.(?:avif|bmp|css|eot|gif|gz|ico|jpe?g|js|json|m4v|map|mov|mp3|mp4|otf|pdf|png|rss|svg|tar|ttf|webm|webp|woff2?|xml|zip)(?:[?#].*)?$`
 }
 
 func (a *App) importBrowsertrixResult(jobID string) (*CaptureResult, error) {
@@ -461,10 +464,16 @@ func parseBrowsertrixLogLine(line string) (string, string) {
 		return requestLevel, requestMsg
 	}
 	var details struct {
-		Page string `json:"page"`
+		Error string `json:"error"`
+		Page  string `json:"page"`
 	}
-	if err := json.Unmarshal(entry.Details, &details); err == nil && details.Page != "" {
-		msg += " " + shortLogURL(details.Page)
+	if err := json.Unmarshal(entry.Details, &details); err == nil {
+		if details.Error != "" {
+			msg += ": " + details.Error
+		}
+		if details.Page != "" {
+			msg += " " + shortLogURL(details.Page)
+		}
 	}
 	if entry.Context != "" && entry.Context != "general" {
 		msg = "Browsertrix " + entry.Context + ": " + msg

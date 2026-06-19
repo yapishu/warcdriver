@@ -94,14 +94,16 @@ type CookieProfileSourceType string
 
 // CreateArchiveJobRequest defines model for CreateArchiveJobRequest.
 type CreateArchiveJobRequest struct {
-	CookieProfileId *string       `json:"cookieProfileId,omitempty"`
-	Depth           *int          `json:"depth,omitempty"`
-	Enrich          *bool         `json:"enrich,omitempty"`
-	MaxPages        *int          `json:"maxPages,omitempty"`
-	Prefix          *string       `json:"prefix,omitempty"`
-	Scope           *ArchiveScope `json:"scope,omitempty"`
-	Url             string        `json:"url"`
-	Urls            *[]string     `json:"urls,omitempty"`
+	CookieProfileId *string `json:"cookieProfileId,omitempty"`
+	Depth           *int    `json:"depth,omitempty"`
+	Enrich          *bool   `json:"enrich,omitempty"`
+
+	// MaxPages Maximum number of pages to capture. Use 0 for unlimited.
+	MaxPages *int          `json:"maxPages,omitempty"`
+	Prefix   *string       `json:"prefix,omitempty"`
+	Scope    *ArchiveScope `json:"scope,omitempty"`
+	Url      string        `json:"url"`
+	Urls     *[]string     `json:"urls,omitempty"`
 }
 
 // CreateCookieProfileRequest defines model for CreateCookieProfileRequest.

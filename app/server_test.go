@@ -53,3 +53,16 @@ func TestNormalizeArchiveJobSubdomainDefaultsToAllDepth(t *testing.T) {
 		t.Fatalf("scope/depth = %s/%d, want same_subdomain/-1", got.Scope, got.Depth)
 	}
 }
+
+func TestNormalizeArchiveJobAllowsUnlimitedMaxPages(t *testing.T) {
+	maxPages := 0
+	scope := api.ArchiveScope("same_subdomain")
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", Scope: &scope, MaxPages: &maxPages}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxPages != 0 {
+		t.Fatalf("maxPages = %d, want 0 for unlimited", got.MaxPages)
+	}
+}

@@ -41,6 +41,8 @@ Capture scopes:
 - `prefix` crawls URLs under the requested prefix with unlimited depth, bounded by `maxPages`.
 - `explicit_urls` captures the provided URL list as individual pages.
 
+Set `maxPages` to `0` to remove the page-count cap. This is intended for whole-publication crawls such as a single Substack subdomain; use the job cancel button if a run gets too broad.
+
 ## Auth
 
 - Browser auth uses SQLite users plus HTTP-only session cookies.

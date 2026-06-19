@@ -309,6 +309,10 @@ function depthLabel(depth: number) {
   return depth < 0 ? "All" : String(depth);
 }
 
+function maxPagesLabel(maxPages: number) {
+  return maxPages < 1 ? "Unlimited" : String(maxPages);
+}
+
 function replayHostLabel(rawURL: string) {
   try {
     return new URL(rawURL).hostname;
@@ -537,6 +541,7 @@ function CaptureDock() {
   const [busy, setBusy] = useState(false);
   const [scope, setScope] = useState<ArchiveScope>("single_page");
   const [depth, setDepth] = useState(0);
+  const [unlimitedPages, setUnlimitedPages] = useState(false);
 
   useEffect(() => {
     const refreshProfiles = () =>
@@ -558,7 +563,7 @@ function CaptureDock() {
       url: String(form.get("url")),
       scope,
       depth,
-      maxPages: Number(form.get("maxPages") || 100),
+      maxPages: unlimitedPages ? 0 : Number(form.get("maxPages") || 100),
       enrich: form.get("enrich") === "on"
     };
     const prefix = String(form.get("prefix") || "").trim();
@@ -571,6 +576,7 @@ function CaptureDock() {
       formEl.reset();
       setScope("single_page");
       setDepth(0);
+      setUnlimitedPages(false);
     } catch (err) {
       setMessage(errorMessage(err));
     } finally {
@@ -582,10 +588,13 @@ function CaptureDock() {
     setScope(next);
     if (next === "single_page" || next === "explicit_urls") {
       setDepth(0);
+      setUnlimitedPages(false);
     } else if (next === "same_subdomain" || next === "prefix") {
       setDepth(-1);
+      setUnlimitedPages(true);
     } else if (depth < 1) {
       setDepth(1);
+      setUnlimitedPages(false);
     }
   }
 
@@ -637,9 +646,18 @@ function CaptureDock() {
               />
             )}
           </label>
-          <label className="small-field">
-            Max
-            <input name="maxPages" type="number" min="1" max="1000" defaultValue="100" />
+          <label className="small-field max-pages-field">
+            Max pages
+            <input name="maxPages" type="number" min="1" max="1000" defaultValue="100" disabled={unlimitedPages} />
+          </label>
+          <label className="check-field unlimited-field">
+            <input
+              name="unlimitedPages"
+              type="checkbox"
+              checked={unlimitedPages}
+              onChange={(event) => setUnlimitedPages(event.target.checked)}
+            />
+            Unlimited
           </label>
           <label className="cookie-field">
             Cookies
@@ -778,7 +796,7 @@ function JobPage({ id }: { id: string }) {
             <Metric icon={<Clock3 size={18} />} label="Depth" value={depthLabel(job.depth)} tone="blue" />
             <Metric icon={<FileText size={18} />} label="Items" value={String(job.items?.length || 0)} tone="green" />
             <Metric icon={<ListFilter size={18} />} label="Scope" value={scopeLabel(job.scope)} tone="neutral" />
-            <Metric icon={<Sparkles size={18} />} label="Max pages" value={String(job.maxPages)} tone="amber" />
+            <Metric icon={<Sparkles size={18} />} label="Max pages" value={maxPagesLabel(job.maxPages)} tone="amber" />
           </section>
           {job.error && <div className="callout danger">{job.error}</div>}
           <section className="split-grid">

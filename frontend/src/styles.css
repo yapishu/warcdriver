@@ -274,6 +274,10 @@ button:disabled {
   flex: 0 0 88px;
 }
 
+.max-pages-field {
+  flex-basis: 124px;
+}
+
 .static-input {
   min-height: 38px;
   display: flex;
@@ -307,6 +311,10 @@ button:disabled {
 .check-field {
   flex: 0 0 auto;
   padding: 0 2px;
+}
+
+.unlimited-field {
+  flex: 0 0 auto;
 }
 
 .capture-button {
