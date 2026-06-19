@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -98,6 +99,17 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	if userAgent != "" {
 		jobLog("info", "capture user agent configured")
 	}
+	headlessRaw, _ := a.store.GetSetting(jobCtx, "capture_headless")
+	captureHeadless, _ := strconv.ParseBool(firstNonEmpty(headlessRaw, getenv("CAPTURE_HEADLESS", "false")))
+	if captureHeadless {
+		jobLog("info", "capture browser mode: headless Brave")
+	} else {
+		jobLog("info", "capture browser mode: headed Brave via Xvfb")
+	}
+	pageDelay := a.captureSettingInt(jobCtx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
+	pageRetries := a.captureSettingInt(jobCtx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", 0, 0, 5)
+	useSitemap := a.captureSettingBool(jobCtx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
+	jobLog("info", fmt.Sprintf("capture pacing: %ds page delay, %d page retries", pageDelay, pageRetries))
 
 	onCaptureLog := func(level, message string) {
 		jobLog(level, message)
@@ -114,6 +126,10 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		UserAgent:    userAgent,
 		Cookies:      browserCookies,
 		BlockAds:     a.filter != nil,
+		Headless:     captureHeadless,
+		PageDelay:    pageDelay,
+		PageRetries:  pageRetries,
+		UseSitemap:   useSitemap,
 		OnLog:        onCaptureLog,
 	})
 	if err != nil {
@@ -174,6 +190,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			Title:        firstNonEmpty(page.Title, page.URL),
 			Summary:      sqlNullString(localSummary(page.Markdown)),
 			TagsJSON:     "[]",
+			Replayable:   page.Replayable,
 			Depth:        page.Depth,
 			StatusCode:   sqlNullInt(page.StatusCode),
 			ContentType:  sqlNullString(page.ContentType),
@@ -351,6 +368,36 @@ func localSummary(markdown string) string {
 
 func errorsIsNoRows(err error) bool {
 	return err == sql.ErrNoRows
+}
+
+func (a *App) captureSettingInt(ctx context.Context, key, envKey string, fallback, minValue, maxValue int) int {
+	raw, _ := a.store.GetSetting(ctx, key)
+	if strings.TrimSpace(raw) == "" {
+		raw = getenv(envKey, strconv.Itoa(fallback))
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func (a *App) captureSettingBool(ctx context.Context, key, envKey string, fallback bool) bool {
+	raw, _ := a.store.GetSetting(ctx, key)
+	if strings.TrimSpace(raw) == "" {
+		raw = getenv(envKey, strconv.FormatBool(fallback))
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func nullString(v sql.NullString) string {

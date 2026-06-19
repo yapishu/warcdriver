@@ -470,7 +470,7 @@ components:
           minimum: 0
           maximum: 1000
           default: 100
-          description: Maximum number of pages to capture. Use 0 for unlimited.
+          description: Maximum number of pages to capture. Use 0 for unlimited. If omitted, same_subdomain and prefix jobs default to unlimited, while other scopes default to 100.
         prefix:
           type: string
           format: uri
@@ -567,7 +567,7 @@ components:
             $ref: "#/components/schemas/Item"
     Item:
       type: object
-      required: [id, siteId, captureId, url, title, depth, createdAt]
+      required: [id, siteId, captureId, url, title, replayable, depth, createdAt]
       properties:
         id:
           type: string
@@ -587,6 +587,8 @@ components:
           type: array
           items:
             type: string
+        replayable:
+          type: boolean
         depth:
           type: integer
         statusCode:
@@ -622,7 +624,7 @@ components:
           format: date-time
     Settings:
       type: object
-      required: [openRouterModel, enrichmentEnabled, filterLists]
+      required: [openRouterModel, enrichmentEnabled, filterLists, captureHeadless, capturePageDelay, capturePageRetries, captureUseSitemap]
       properties:
         openRouterModel:
           type: string
@@ -636,6 +638,18 @@ components:
             type: string
         userAgent:
           type: string
+        captureHeadless:
+          type: boolean
+        capturePageDelay:
+          type: integer
+          minimum: 1
+          maximum: 120
+        capturePageRetries:
+          type: integer
+          minimum: 0
+          maximum: 5
+        captureUseSitemap:
+          type: boolean
     UpdateSettingsRequest:
       type: object
       properties:
@@ -651,6 +665,18 @@ components:
             type: string
         userAgent:
           type: string
+        captureHeadless:
+          type: boolean
+        capturePageDelay:
+          type: integer
+          minimum: 1
+          maximum: 120
+        capturePageRetries:
+          type: integer
+          minimum: 0
+          maximum: 5
+        captureUseSitemap:
+          type: boolean
     CookieProfileSourceType:
       type: string
       enum: [raw_header, netscape, json]

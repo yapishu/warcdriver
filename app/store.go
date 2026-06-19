@@ -93,6 +93,7 @@ type ItemRecord struct {
 	Title        string
 	Summary      sql.NullString
 	TagsJSON     string
+	Replayable   bool
 	Depth        int
 	StatusCode   sql.NullInt64
 	ContentType  sql.NullString
@@ -224,6 +225,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			title TEXT NOT NULL,
 			summary TEXT,
 			tags_json TEXT NOT NULL DEFAULT '[]',
+			replayable INTEGER NOT NULL DEFAULT 1,
 			depth INTEGER NOT NULL,
 			status_code INTEGER,
 			content_type TEXT,
@@ -246,6 +248,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if err := s.ensureUsersSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureItemsSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureReplayabilityBackfill(ctx); err != nil {
 		return err
 	}
 	return s.ensureDefaultSettings(ctx)
@@ -341,6 +349,118 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]tabl
 	return cols, rows.Err()
 }
 
+func (s *Store) ensureItemsSchema(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "items")
+	if err != nil {
+		return err
+	}
+	if _, ok := cols["replayable"]; ok {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1`)
+	return err
+}
+
+func (s *Store) ensureReplayabilityBackfill(ctx context.Context) error {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, "replayability_backfilled_v1").Scan(&value)
+	if err == nil && value == "true" {
+		return nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := s.backfillItemReplayability(ctx); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		"replayability_backfilled_v1", "true")
+	return err
+}
+
+func (s *Store) backfillItemReplayability(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, warc_path FROM captures ORDER BY created_at ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type capturePath struct {
+		ID   string
+		Path string
+	}
+	var captures []capturePath
+	for rows.Next() {
+		var rec capturePath
+		if err := rows.Scan(&rec.ID, &rec.Path); err != nil {
+			return err
+		}
+		captures = append(captures, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, capture := range captures {
+		if strings.TrimSpace(capture.Path) == "" || !strings.HasSuffix(strings.ToLower(capture.Path), ".wacz") {
+			continue
+		}
+		replayable, err := readBrowsertrixReplayableURLsFromWACZ(capture.Path)
+		if err != nil {
+			continue
+		}
+		if replayable == nil {
+			continue
+		}
+		if err := s.backfillCaptureReplayability(ctx, capture.ID, replayable); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) backfillCaptureReplayability(ctx context.Context, captureID string, replayable map[string]bool) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, url FROM items WHERE capture_id = ?`, captureID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type itemReplayability struct {
+		ID         string
+		Replayable bool
+	}
+	var items []itemReplayability
+	for rows.Next() {
+		var id, rawURL string
+		if err := rows.Scan(&id, &rawURL); err != nil {
+			return err
+		}
+		items = append(items, itemReplayability{
+			ID:         id,
+			Replayable: replayable[normalizeURL(rawURL)],
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, item := range items {
+		if _, err := tx.ExecContext(ctx, `UPDATE items SET replayable = ? WHERE id = ?`, boolInt(item.Replayable), item.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) usersForMigration(ctx context.Context, hasUsername, hasEmail bool) ([]userMigrationRecord, error) {
 	usernameExpr := "''"
 	if hasUsername {
@@ -421,11 +541,15 @@ func nullableDBText(value string) any {
 
 func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 	defaults := map[string]string{
-		"openrouter_model":   getenv("OPENROUTER_MODEL", "openrouter/auto"),
-		"openrouter_api_key": getenv("OPENROUTER_API_KEY", ""),
-		"enrichment_enabled": "true",
-		"filter_lists":       `["https://easylist.to/easylist/easylist.txt","https://easylist.to/easylist/easyprivacy.txt"]`,
-		"user_agent":         getenv("CAPTURE_USER_AGENT", ""),
+		"openrouter_model":     getenv("OPENROUTER_MODEL", "openrouter/auto"),
+		"openrouter_api_key":   getenv("OPENROUTER_API_KEY", ""),
+		"enrichment_enabled":   "true",
+		"filter_lists":         `["https://easylist.to/easylist/easylist.txt","https://easylist.to/easylist/easyprivacy.txt"]`,
+		"user_agent":           getenv("CAPTURE_USER_AGENT", ""),
+		"capture_headless":     getenv("CAPTURE_HEADLESS", "false"),
+		"capture_page_delay":   getenv("CAPTURE_PAGE_DELAY", "3"),
+		"capture_page_retries": getenv("CAPTURE_PAGE_RETRIES", "0"),
+		"capture_use_sitemap":  getenv("CAPTURE_USE_SITEMAP", "true"),
 	}
 	for k, v := range defaults {
 		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, k, v); err != nil {
@@ -966,10 +1090,10 @@ func (s *Store) CreateItem(ctx context.Context, rec ItemRecord) (*ItemRecord, er
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO items(
 			id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
-			depth, status_code, content_type, markdown_path, created_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			replayable, depth, status_code, content_type, markdown_path, created_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.JobID, rec.CaptureID, rec.SiteID, rec.URL, rec.CanonicalURL, rec.Title,
-		rec.Summary, rec.TagsJSON, rec.Depth, rec.StatusCode, rec.ContentType, rec.MarkdownPath,
+		rec.Summary, rec.TagsJSON, boolInt(rec.Replayable), rec.Depth, rec.StatusCode, rec.ContentType, rec.MarkdownPath,
 		formatTime(now))
 	if err != nil {
 		return nil, err
@@ -993,7 +1117,7 @@ func (s *Store) UpdateItemEnrichment(ctx context.Context, itemID, summary string
 
 func (s *Store) GetItem(ctx context.Context, id string) (*ItemRecord, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
-			depth, status_code, content_type, markdown_path, created_at FROM items WHERE id = ?`, id)
+			replayable, depth, status_code, content_type, markdown_path, created_at FROM items WHERE id = ?`, id)
 	return scanItem(row)
 }
 
@@ -1026,7 +1150,7 @@ func (s *Store) ListItems(ctx context.Context, siteID, query string, limit int) 
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
-			depth, status_code, content_type, markdown_path, created_at FROM items WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC LIMIT ?`, args...)
+			replayable, depth, status_code, content_type, markdown_path, created_at FROM items WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1048,7 +1172,7 @@ func (s *Store) ListItemsForSite(ctx context.Context, siteID string, limit int) 
 
 func (s *Store) ListItemsForJob(ctx context.Context, jobID string) ([]ItemRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
-			depth, status_code, content_type, markdown_path, created_at FROM items WHERE job_id = ? ORDER BY depth ASC, created_at ASC`, jobID)
+			replayable, depth, status_code, content_type, markdown_path, created_at FROM items WHERE job_id = ? ORDER BY depth ASC, created_at ASC`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -1067,8 +1191,9 @@ func (s *Store) ListItemsForJob(ctx context.Context, jobID string) ([]ItemRecord
 func scanItem(row interface{ Scan(dest ...any) error }) (*ItemRecord, error) {
 	var rec ItemRecord
 	var created string
+	var replayable int
 	if err := row.Scan(&rec.ID, &rec.JobID, &rec.CaptureID, &rec.SiteID, &rec.URL, &rec.CanonicalURL,
-		&rec.Title, &rec.Summary, &rec.TagsJSON, &rec.Depth, &rec.StatusCode, &rec.ContentType,
+		&rec.Title, &rec.Summary, &rec.TagsJSON, &replayable, &rec.Depth, &rec.StatusCode, &rec.ContentType,
 		&rec.MarkdownPath, &created); err != nil {
 		return nil, err
 	}
@@ -1076,6 +1201,7 @@ func scanItem(row interface{ Scan(dest ...any) error }) (*ItemRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	rec.Replayable = replayable != 0
 	rec.CreatedAt = t
 	return &rec, nil
 }

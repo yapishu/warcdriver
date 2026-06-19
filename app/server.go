@@ -378,9 +378,11 @@ func (a *App) GetItem(w http.ResponseWriter, r *http.Request, id api.Id) {
 		}
 	}
 	warcURL := "/api/warcs/" + item.CaptureID + "/download"
-	replayURL := "/viewer/" + item.CaptureID + "?url=" + url.QueryEscape(item.URL)
 	detail.WarcDownloadUrl = &warcURL
-	detail.ReplayUrl = &replayURL
+	if item.Replayable {
+		replayURL := "/viewer/" + item.CaptureID + "?url=" + url.QueryEscape(item.URL)
+		detail.ReplayUrl = &replayURL
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -475,6 +477,30 @@ func (a *App) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.UserAgent != nil {
 		if err := a.store.SetSetting(r.Context(), "user_agent", *req.UserAgent); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if req.CaptureHeadless != nil {
+		if err := a.store.SetSetting(r.Context(), "capture_headless", strconv.FormatBool(*req.CaptureHeadless)); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if req.CapturePageDelay != nil {
+		if err := a.store.SetSetting(r.Context(), "capture_page_delay", strconv.Itoa(clampInt(*req.CapturePageDelay, 1, 120))); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if req.CapturePageRetries != nil {
+		if err := a.store.SetSetting(r.Context(), "capture_page_retries", strconv.Itoa(clampInt(*req.CapturePageRetries, 0, 5))); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if req.CaptureUseSitemap != nil {
+		if err := a.store.SetSetting(r.Context(), "capture_use_sitemap", strconv.FormatBool(*req.CaptureUseSitemap)); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -586,6 +612,11 @@ func (a *App) currentSettings(ctx context.Context) (api.Settings, error) {
 	if strings.TrimSpace(userAgent) == "" {
 		userAgent = getenv("CAPTURE_USER_AGENT", "")
 	}
+	headlessRaw, _ := a.store.GetSetting(ctx, "capture_headless")
+	captureHeadless, _ := strconv.ParseBool(firstNonEmpty(headlessRaw, getenv("CAPTURE_HEADLESS", "false")))
+	capturePageDelay := a.captureSettingInt(ctx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
+	capturePageRetries := a.captureSettingInt(ctx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", 0, 0, 5)
+	captureUseSitemap := a.captureSettingBool(ctx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
 	openRouterKey, _ := a.openRouterAPIKey(ctx)
 	openRouterKeyConfigured := openRouterKey != ""
 	settings := api.Settings{
@@ -594,8 +625,22 @@ func (a *App) currentSettings(ctx context.Context) (api.Settings, error) {
 		EnrichmentEnabled:          enabled,
 		FilterLists:                lists,
 		UserAgent:                  nullablePlainString(userAgent),
+		CaptureHeadless:            captureHeadless,
+		CapturePageDelay:           capturePageDelay,
+		CapturePageRetries:         capturePageRetries,
+		CaptureUseSitemap:          captureUseSitemap,
 	}
 	return settings, nil
+}
+
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func nullablePlainString(v string) *string {
@@ -643,6 +688,9 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 		depth = -1
 	}
 	maxPages := 100
+	if scope == "same_subdomain" || scope == "prefix" {
+		maxPages = 0
+	}
 	if req.MaxPages != nil {
 		maxPages = *req.MaxPages
 	}
@@ -821,6 +869,7 @@ func apiItem(i *ItemRecord) api.Item {
 		Title:        i.Title,
 		Summary:      nullableString(i.Summary),
 		Tags:         tagsFromJSON(i.TagsJSON),
+		Replayable:   i.Replayable,
 		Depth:        i.Depth,
 		StatusCode:   nullableInt(i.StatusCode),
 		ContentType:  nullableString(i.ContentType),
@@ -839,6 +888,7 @@ func apiItemDetail(i *ItemRecord) api.ItemDetail {
 		Title:        base.Title,
 		Summary:      base.Summary,
 		Tags:         base.Tags,
+		Replayable:   base.Replayable,
 		Depth:        base.Depth,
 		StatusCode:   base.StatusCode,
 		ContentType:  base.ContentType,

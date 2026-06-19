@@ -53,6 +53,7 @@ export type Item = {
   title: string;
   summary?: string;
   tags?: string[];
+  replayable: boolean;
   depth: number;
   statusCode?: number;
   contentType?: string;
@@ -78,6 +79,10 @@ export type Settings = {
   enrichmentEnabled: boolean;
   filterLists: string[];
   userAgent?: string;
+  captureHeadless: boolean;
+  capturePageDelay: number;
+  capturePageRetries: number;
+  captureUseSitemap: boolean;
 };
 
 export type CookieProfileSourceType = "raw_header" | "netscape" | "json";

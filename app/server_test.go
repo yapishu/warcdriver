@@ -49,8 +49,8 @@ func TestNormalizeArchiveJobSubdomainDefaultsToAllDepth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Scope != "same_subdomain" || got.Depth != -1 {
-		t.Fatalf("scope/depth = %s/%d, want same_subdomain/-1", got.Scope, got.Depth)
+	if got.Scope != "same_subdomain" || got.Depth != -1 || got.MaxPages != 0 {
+		t.Fatalf("scope/depth/maxPages = %s/%d/%d, want same_subdomain/-1/0", got.Scope, got.Depth, got.MaxPages)
 	}
 }
 

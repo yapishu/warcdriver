@@ -41,7 +41,7 @@ Capture scopes:
 - `prefix` crawls URLs under the requested prefix with unlimited depth, bounded by `maxPages`.
 - `explicit_urls` captures the provided URL list as individual pages.
 
-Set `maxPages` to `0` to remove the page-count cap. This is intended for whole-publication crawls such as a single Substack subdomain; use the job cancel button if a run gets too broad.
+Set `maxPages` to `0` to remove the page-count cap. This is intended for whole-publication crawls such as a single Substack subdomain; use the job cancel button if a run gets too broad. If `maxPages` is omitted, `same_subdomain` and `prefix` jobs default to unlimited, while other scopes default to 100 pages.
 
 ## Auth
 
@@ -53,6 +53,16 @@ Set `maxPages` to `0` to remove the page-count cap. This is intended for whole-p
 ## Capture engine
 
 Browsertrix is the only capture engine. Compose starts a `browsertrix-worker` sidecar that watches `./data/browsertrix/jobs`, runs Browsertrix without needing the Docker socket, and writes WACZ/WARC output under `./data/browsertrix/runs`.
+
+The Browsertrix image currently launches Brave. WARCdriver defaults to Browsertrix's headed mode under Xvfb (`capture_headless=false`) because it tends to look less like automation than Chrome/Brave headless. Set `CAPTURE_HEADLESS=true` or enable the Headless browser setting if you prefer headless mode.
+
+WARCdriver stores one capture record per Browsertrix run, so a site crawl is one WACZ collection even when many pages are indexed from it. During import, WARCdriver reads Browsertrix's CDX and marks catalog items as replayable only when the WACZ contains a real HTTP response for that page URL. Browsertrix can sometimes write useful `pages.jsonl` text for client-side routes while only storing `urn:pageinfo:*` records; those entries remain searchable but do not get a View button because WABAC cannot replay them as top-level pages.
+
+Capture pacing is configurable in Settings or via environment:
+
+- `CAPTURE_PAGE_DELAY` defaults to `3` seconds between Browsertrix pages.
+- `CAPTURE_PAGE_RETRIES` defaults to `0` to avoid fast retry storms on invalid-status pages.
+- `CAPTURE_USE_SITEMAP` defaults to `true`, but WARCdriver only enables Browsertrix sitemap discovery for uncapped or broad same-subdomain crawls so small capped crawls do not spend the entire page budget on sitemap URLs.
 
 ## Cookies and profiles
 

@@ -14,6 +14,7 @@ type CapturedPage struct {
 	CanonicalURL  string
 	Title         string
 	Markdown      string
+	Replayable    bool
 	Depth         int
 	StatusCode    int
 	ContentType   string

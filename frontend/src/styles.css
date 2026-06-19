@@ -371,6 +371,21 @@ button:disabled {
   font-size: 12px;
 }
 
+.muted-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: #f2f4f0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 780;
+  white-space: nowrap;
+}
+
 .danger-button {
   border-color: rgba(154, 45, 50, 0.24);
   background: #fff8f7;

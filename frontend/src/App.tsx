@@ -771,6 +771,17 @@ function JobPage({ id }: { id: string }) {
             aside={
               <div className="action-row">
                 <StatusPill status={job.status} />
+                {job.captureId && job.items?.some((item) => item.replayable) && (
+                  <a
+                    className="view-button"
+                    href={viewerHref(job.captureId, job.items.find((item) => item.replayable)?.url || job.url)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <Maximize2 size={16} />
+                    View archive
+                  </a>
+                )}
                 {(job.status === "queued" || job.status === "running") && (
                   <button className="icon-button" type="button" onClick={cancelJob}>
                     <XCircle size={16} />
@@ -799,6 +810,9 @@ function JobPage({ id }: { id: string }) {
             <Metric icon={<Sparkles size={18} />} label="Max pages" value={maxPagesLabel(job.maxPages)} tone="amber" />
           </section>
           {job.error && <div className="callout danger">{job.error}</div>}
+          {job.status === "succeeded" && (job.items?.length || 0) > 0 && !job.items?.some((item) => item.replayable) && (
+            <div className="callout">This WACZ contains indexed page text, but Browsertrix did not write replayable top-level document responses for these routes.</div>
+          )}
           <section className="split-grid">
             <Panel title="Captured pages">
               <ItemTable items={job.items || []} />
@@ -934,6 +948,7 @@ function ItemPage({ id }: { id: string }) {
             <Panel title="Metadata">
               <dl className="metadata-list">
                 <div><dt>Status</dt><dd>{item.statusCode || "n/a"}</dd></div>
+                <div><dt>Replay</dt><dd>{item.replayable ? "available" : "indexed text only"}</dd></div>
                 <div><dt>Depth</dt><dd>{item.depth}</dd></div>
                 <div><dt>Type</dt><dd>{item.contentType || "unknown"}</dd></div>
                 <div><dt>Captured</dt><dd>{formatDate(item.createdAt)}</dd></div>
@@ -1089,7 +1104,11 @@ function SettingsForm({ settings, onSaved }: { settings: SettingsType; onSaved: 
     const payload: Partial<SettingsType> & { openRouterApiKey?: string } = {
       enrichmentEnabled: form.get("enrichmentEnabled") === "on",
       filterLists,
-      userAgent: String(form.get("userAgent") || "").trim()
+      userAgent: String(form.get("userAgent") || "").trim(),
+      captureHeadless: form.get("captureHeadless") === "on",
+      capturePageDelay: Number(form.get("capturePageDelay") || settings.capturePageDelay),
+      capturePageRetries: Number(form.get("capturePageRetries") || settings.capturePageRetries),
+      captureUseSitemap: form.get("captureUseSitemap") === "on"
     };
     if (editingModel && model) payload.openRouterModel = model;
     if (editingApiKey && apiKey) payload.openRouterApiKey = apiKey;
@@ -1169,6 +1188,24 @@ function SettingsForm({ settings, onSaved }: { settings: SettingsType; onSaved: 
             placeholder="Optional browser user agent override"
           />
         </label>
+        <div className="trick-grid">
+          <label className="check-line">
+            <input name="captureHeadless" type="checkbox" defaultChecked={settings.captureHeadless} />
+            Headless browser
+          </label>
+          <label className="check-line">
+            <input name="captureUseSitemap" type="checkbox" defaultChecked={settings.captureUseSitemap} />
+            Sitemap discovery
+          </label>
+          <label>
+            Page delay
+            <input name="capturePageDelay" type="number" min="1" max="120" defaultValue={settings.capturePageDelay} />
+          </label>
+          <label>
+            Page retries
+            <input name="capturePageRetries" type="number" min="0" max="5" defaultValue={settings.capturePageRetries} />
+          </label>
+        </div>
         {message && <div className="callout">{message}</div>}
         <div className="action-row">
           <button className="primary-button">
@@ -1225,7 +1262,7 @@ function CookieProfiles({ profiles, onChanged }: { profiles: CookieProfile[]; on
       <div className="secret-panel cookie-helper">
         <div>
           <span className="field-label">Recommended import</span>
-          <strong>Use Cookie-Editor</strong>
+          <strong>Use <a href="https://cookie-editor.com/" target="_blank">Cookie-Editor</a></strong>
           <p>Install Cookie-Editor, open the authenticated tab, export cookies as JSON, and paste the export below. WARCdriver turns selected cookie profiles into a temporary Browsertrix profile before capture.</p>
         </div>
       </div>
@@ -1577,10 +1614,14 @@ function ItemTable({ items }: { items: Item[] }) {
               <td><TagRow tags={item.tags || []} tight /></td>
               <td>
                 <div className="row-actions">
-                  <a className="view-button compact-view" href={viewerHref(item.captureId, item.url)} target="_blank" rel="noreferrer">
-                    <Maximize2 size={14} />
-                    View
-                  </a>
+                  {item.replayable ? (
+                    <a className="view-button compact-view" href={viewerHref(item.captureId, item.url)} target="_blank" rel="noreferrer">
+                      <Maximize2 size={14} />
+                      View
+                    </a>
+                  ) : (
+                    <span className="muted-pill">Indexed</span>
+                  )}
                   <a className="row-link" href={href(`items/${item.id}`)}>Details</a>
                 </div>
               </td>
@@ -1605,10 +1646,14 @@ function ItemStack({ items }: { items: Item[] }) {
               <span>{item.summary || item.url}</span>
             </div>
           </a>
-          <a className="view-button compact-view" href={viewerHref(item.captureId, item.url)} target="_blank" rel="noreferrer">
-            <Maximize2 size={14} />
-            View
-          </a>
+          {item.replayable ? (
+            <a className="view-button compact-view" href={viewerHref(item.captureId, item.url)} target="_blank" rel="noreferrer">
+              <Maximize2 size={14} />
+              View
+            </a>
+          ) : (
+            <span className="muted-pill">Indexed</span>
+          )}
         </div>
       ))}
     </div>

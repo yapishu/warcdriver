@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +31,10 @@ type BrowsertrixCaptureOptions struct {
 	ProfilePath  string
 	Cookies      []browserCookieData
 	BlockAds     bool
+	Headless     bool
+	PageDelay    int
+	PageRetries  int
+	UseSitemap   bool
 	OnLog        func(level, message string)
 }
 
@@ -55,6 +62,13 @@ type browsertrixLogEntry struct {
 	Context   string          `json:"context"`
 	Message   string          `json:"message"`
 	Details   json.RawMessage `json:"details"`
+}
+
+type browsertrixCDXRecord struct {
+	URL    string `json:"url"`
+	Mime   string `json:"mime"`
+	Status string `json:"status"`
+	Method string `json:"method"`
 }
 
 func (a *App) captureArchiveWithBrowsertrix(ctx context.Context, opts BrowsertrixCaptureOptions) (*CaptureResult, error) {
@@ -168,7 +182,7 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 	config := map[string]any{
 		"seeds":               seeds,
 		"collection":          opts.JobID,
-		"headless":            true,
+		"headless":            opts.Headless,
 		"generateWACZ":        true,
 		"combineWARC":         true,
 		"overwrite":           true,
@@ -177,23 +191,30 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 		"scopeType":           scopeType,
 		"depth":               depth,
 		"pageLoadTimeout":     90,
+		"serviceWorker":       "disabled",
 		"waitUntil":           []string{"load", "networkidle2"},
 		"netIdleWait":         2,
 		"postLoadDelay":       1,
-		"pageExtraDelay":      5,
-		"maxPageRetries":      3,
-		"failOnInvalidStatus": true,
+		"pageExtraDelay":      browsertrixPageExtraDelay(opts),
+		"maxPageRetries":      browsertrixMaxPageRetries(opts),
+		"failOnFailedSeed":    true,
+		"failOnInvalidStatus": false,
 		"behaviors":           []string{"autoplay", "autofetch", "autoscroll", "siteSpecific"},
 		"blockAds":            opts.BlockAds,
 		"saveState":           "partial",
 		"logging":             []string{"stats"},
 		"logLevel":            []string{"info", "warn", "error"},
+		"selectLinks":         browsertrixLinkSelectors(),
+		"clickSelector":       browsertrixClickSelector(),
 		"warcPrefix":          opts.JobID,
 		"title":               firstNonEmpty(hostFromURL(opts.StartURL), opts.StartURL),
 	}
 	if opts.MaxPages > 0 {
 		config["pageLimit"] = opts.MaxPages
 		config["maxPageLimit"] = opts.MaxPages
+	}
+	if opts.Scope == "same_subdomain" && opts.UseSitemap && (opts.MaxPages == 0 || opts.MaxPages >= 50) {
+		config["useSitemap"] = true
 	}
 	if include != "" {
 		config["scopeIncludeRx"] = include
@@ -222,6 +243,10 @@ func browsertrixRequestSummary(opts BrowsertrixCaptureOptions) map[string]any {
 		"userAgentSet": strings.TrimSpace(opts.UserAgent) != "",
 		"cookieCount":  len(opts.Cookies),
 		"blockAds":     opts.BlockAds,
+		"headless":     opts.Headless,
+		"pageDelay":    browsertrixPageExtraDelay(opts),
+		"pageRetries":  browsertrixMaxPageRetries(opts),
+		"useSitemap":   opts.UseSitemap,
 	}
 }
 
@@ -274,6 +299,36 @@ func browsertrixPageExcludeRx() string {
 	return `\.(?:avif|bmp|css|eot|gif|gz|ico|jpe?g|js|json|m4v|map|mov|mp3|mp4|otf|pdf|png|rss|svg|tar|ttf|webm|webp|woff2?|xml|zip)(?:[?#].*)?$`
 }
 
+func browsertrixLinkSelectors() []string {
+	return []string{
+		`a[href]:not([href^="#"]):not([href^="javascript:"]):not([href^="mailto:"]):not([href^="tel:"])->href`,
+	}
+}
+
+func browsertrixClickSelector() string {
+	return `a[href]:not([href^="#"]):not([href^="javascript:"])`
+}
+
+func browsertrixPageExtraDelay(opts BrowsertrixCaptureOptions) int {
+	if opts.PageDelay > 0 {
+		if opts.PageDelay > 120 {
+			return 120
+		}
+		return opts.PageDelay
+	}
+	return 3
+}
+
+func browsertrixMaxPageRetries(opts BrowsertrixCaptureOptions) int {
+	if opts.PageRetries >= 0 {
+		if opts.PageRetries > 5 {
+			return 5
+		}
+		return opts.PageRetries
+	}
+	return 1
+}
+
 func (a *App) importBrowsertrixResult(jobID string) (*CaptureResult, error) {
 	collectionDir := a.browsertrixCollectionDir(jobID)
 	pages, err := readBrowsertrixCapturedPages(collectionDir)
@@ -297,6 +352,10 @@ func readBrowsertrixCapturedPages(collectionDir string) ([]CapturedPage, error) 
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	replayable, err := readBrowsertrixReplayableURLs(collectionDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	out := make([]CapturedPage, 0, len(pages)+len(extraPages))
 	for _, page := range append(pages, extraPages...) {
@@ -305,12 +364,95 @@ func readBrowsertrixCapturedPages(collectionDir string) ([]CapturedPage, error) 
 			continue
 		}
 		seen[key] = true
+		if replayable == nil {
+			page.Replayable = true
+		} else {
+			page.Replayable = replayable[key]
+		}
 		out = append(out, page)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("Browsertrix output contained no pages")
 	}
 	return out, nil
+}
+
+func readBrowsertrixReplayableURLs(collectionDir string) (map[string]bool, error) {
+	f, err := os.Open(filepath.Join(collectionDir, "indexes", "index.cdx.gz"))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return readBrowsertrixReplayableURLsFromGzip(f)
+}
+
+func readBrowsertrixReplayableURLsFromWACZ(path string) (map[string]bool, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+
+	for _, file := range zr.File {
+		if file.Name != "indexes/index.cdx.gz" {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return readBrowsertrixReplayableURLsFromGzip(rc)
+	}
+	return nil, os.ErrNotExist
+}
+
+func readBrowsertrixReplayableURLsFromGzip(r io.Reader) (map[string]bool, error) {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+
+	replayable := map[string]bool{}
+	scanner := bufio.NewScanner(gz)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		var rec browsertrixCDXRecord
+		if err := json.Unmarshal([]byte(parts[2]), &rec); err != nil {
+			continue
+		}
+		if browsertrixCDXRecordReplayable(rec) {
+			replayable[normalizeURL(rec.URL)] = true
+		}
+	}
+	return replayable, scanner.Err()
+}
+
+func browsertrixCDXRecordReplayable(rec browsertrixCDXRecord) bool {
+	rawURL := strings.TrimSpace(rec.URL)
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return false
+	}
+	method := strings.ToUpper(strings.TrimSpace(rec.Method))
+	if method != "" && method != "GET" {
+		return false
+	}
+	status, err := strconv.Atoi(strings.TrimSpace(rec.Status))
+	if err != nil || status < 200 || status >= 400 {
+		return false
+	}
+	mime := strings.ToLower(strings.TrimSpace(rec.Mime))
+	return mime != "warc/revisit"
 }
 
 func readBrowsertrixPages(path string, includeFailures bool) ([]CapturedPage, error) {
@@ -466,10 +608,21 @@ func parseBrowsertrixLogLine(line string) (string, string) {
 	var details struct {
 		Error string `json:"error"`
 		Page  string `json:"page"`
+		URL   string `json:"url"`
 	}
 	if err := json.Unmarshal(entry.Details, &details); err == nil {
+		if strings.HasPrefix(msg, "Invalid Page") && isBrowsertrixNonPageURL(details.URL) {
+			out := "Browsertrix skipped non-page link " + details.URL
+			if details.Page != "" {
+				out += " on " + shortLogURL(details.Page)
+			}
+			return "debug", out
+		}
 		if details.Error != "" {
 			msg += ": " + details.Error
+		}
+		if details.URL != "" {
+			msg += " " + shortLogURL(details.URL)
 		}
 		if details.Page != "" {
 			msg += " " + shortLogURL(details.Page)
@@ -479,6 +632,15 @@ func parseBrowsertrixLogLine(line string) (string, string) {
 		msg = "Browsertrix " + entry.Context + ": " + msg
 	}
 	return level, msg
+}
+
+func isBrowsertrixNonPageURL(raw string) bool {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	return lower == "" ||
+		strings.HasPrefix(lower, "javascript:") ||
+		strings.HasPrefix(lower, "mailto:") ||
+		strings.HasPrefix(lower, "tel:") ||
+		strings.HasPrefix(lower, "#")
 }
 
 func browsertrixRequestFailureLog(entry browsertrixLogEntry, level string) (string, string) {

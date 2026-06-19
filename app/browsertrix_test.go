@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"os"
@@ -193,8 +195,15 @@ func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
 	if cfg["scopeType"] != "any" || cfg["depth"] != 2 {
 		t.Fatalf("scopeType/depth = %v/%v, want any/2", cfg["scopeType"], cfg["depth"])
 	}
-	if cfg["failOnInvalidStatus"] != true || cfg["maxPageRetries"] != 3 || cfg["pageExtraDelay"] != 5 {
+	if cfg["headless"] != false {
+		t.Fatalf("headless = %v, want false by default", cfg["headless"])
+	}
+	if cfg["failOnInvalidStatus"] != false || cfg["maxPageRetries"] != 0 || cfg["pageExtraDelay"] != 3 {
 		t.Fatalf("retry/delay config = failOnInvalidStatus:%v maxPageRetries:%v pageExtraDelay:%v", cfg["failOnInvalidStatus"], cfg["maxPageRetries"], cfg["pageExtraDelay"])
+	}
+	selectLinks, ok := cfg["selectLinks"].([]string)
+	if !ok || len(selectLinks) != 1 || !strings.Contains(selectLinks[0], `:not([href^="javascript:"])`) {
+		t.Fatalf("selectLinks should skip fake anchor URLs: %v", cfg["selectLinks"])
 	}
 	exclude, ok := cfg["scopeExcludeRx"].(string)
 	if !ok || !strings.Contains(exclude, "webp") || !strings.Contains(exclude, "pdf") {
@@ -208,13 +217,30 @@ func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
 	}
 }
 
+func TestBrowsertrixConfigHonorsHeadlessSetting(t *testing.T) {
+	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
+		JobID:    "headless",
+		StartURL: "https://example.com/",
+		Scope:    "single_page",
+		MaxPages: 1,
+		Headless: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["headless"] != true {
+		t.Fatalf("headless = %v, want true", cfg["headless"])
+	}
+}
+
 func TestBrowsertrixConfigSubdomainAllowsUnlimitedDepth(t *testing.T) {
 	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
-		JobID:    "subdomain",
-		StartURL: "https://example.com/",
-		Scope:    "same_subdomain",
-		Depth:    -1,
-		MaxPages: 0,
+		JobID:      "subdomain",
+		StartURL:   "https://example.com/",
+		Scope:      "same_subdomain",
+		Depth:      -1,
+		MaxPages:   0,
+		UseSitemap: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -222,11 +248,101 @@ func TestBrowsertrixConfigSubdomainAllowsUnlimitedDepth(t *testing.T) {
 	if cfg["scopeType"] != "host" || cfg["depth"] != -1 {
 		t.Fatalf("scopeType/depth = %v/%v, want host/-1", cfg["scopeType"], cfg["depth"])
 	}
+	if cfg["useSitemap"] != true {
+		t.Fatalf("same_subdomain should enable sitemap discovery: %v", cfg["useSitemap"])
+	}
+	if cfg["failOnInvalidStatus"] != false || cfg["maxPageRetries"] != 0 || cfg["pageExtraDelay"] != 3 {
+		t.Fatalf("subdomain retry/delay config = failOnInvalidStatus:%v maxPageRetries:%v pageExtraDelay:%v", cfg["failOnInvalidStatus"], cfg["maxPageRetries"], cfg["pageExtraDelay"])
+	}
 	if _, ok := cfg["pageLimit"]; ok {
 		t.Fatalf("pageLimit should be omitted for unlimited captures: %v", cfg["pageLimit"])
 	}
 	if _, ok := cfg["maxPageLimit"]; ok {
 		t.Fatalf("maxPageLimit should be omitted for unlimited captures: %v", cfg["maxPageLimit"])
+	}
+}
+
+func TestReadBrowsertrixCapturedPagesMarksReplayabilityFromCDX(t *testing.T) {
+	collectionDir := t.TempDir()
+	pagesDir := filepath.Join(collectionDir, "pages")
+	if err := os.MkdirAll(filepath.Join(collectionDir, "indexes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pagesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pages := `{"format":"json-pages-1.0","id":"pages","title":"Seed Pages","hasText":"true"}` + "\n" +
+		`{"id":"p1","url":"https://example.com/","title":"Example","mime":"text/html","status":200,"seed":true,"depth":0,"text":"Home"}` + "\n"
+	extra := `{"format":"json-pages-1.0","id":"pages","title":"Non-Seed Pages","hasText":"true"}` + "\n" +
+		`{"id":"p2","url":"https://example.com/archive","title":"Archive","mime":"text/html","status":200,"depth":1,"text":"Archive text"}` + "\n"
+	if err := os.WriteFile(filepath.Join(pagesDir, "pages.jsonl"), []byte(pages), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pagesDir, "extraPages.jsonl"), []byte(extra), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cdx, err := os.Create(filepath.Join(collectionDir, "indexes", "index.cdx.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(cdx)
+	_, _ = gz.Write([]byte(`com,example)/ 20260619000000 {"url":"https://example.com/","mime":"text/html","status":"200","filename":"test.warc.gz"}` + "\n"))
+	_, _ = gz.Write([]byte(`urn:pageinfo:https://example.com/archive 20260619000001 {"url":"urn:pageinfo:https://example.com/archive","mime":"application/json","filename":"test.warc.gz"}` + "\n"))
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cdx.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	captured, err := readBrowsertrixCapturedPages(collectionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("captured pages = %d, want 2", len(captured))
+	}
+	if !captured[0].Replayable {
+		t.Fatalf("seed should be replayable: %+v", captured[0])
+	}
+	if captured[1].Replayable {
+		t.Fatalf("pageinfo-only page should not be replayable: %+v", captured[1])
+	}
+}
+
+func TestReadBrowsertrixReplayableURLsFromWACZ(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "capture.wacz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	cdxFile, err := zw.Create("indexes/index.cdx.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(cdxFile)
+	_, _ = gz.Write([]byte(`com,example)/ 20260619000000 {"url":"https://example.com/","mime":"text/html","status":"200","filename":"test.warc.gz"}` + "\n"))
+	_, _ = gz.Write([]byte(`com,example)/missing 20260619000001 {"url":"https://example.com/missing","mime":"text/html","status":"404","filename":"test.warc.gz"}` + "\n"))
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	replayable, err := readBrowsertrixReplayableURLsFromWACZ(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayable[normalizeURL("https://example.com/")] {
+		t.Fatal("expected html 200 page to be replayable")
+	}
+	if replayable[normalizeURL("https://example.com/missing")] {
+		t.Fatal("expected 404 page to not be replayable")
 	}
 }
 
@@ -237,6 +353,17 @@ func TestParseBrowsertrixLogLineIncludesGeneralErrorDetail(t *testing.T) {
 		t.Fatalf("level = %q, want error", level)
 	}
 	if !strings.Contains(msg, "Failed to create seed: SyntaxError: Invalid regular expression") {
+		t.Fatalf("unexpected message: %q", msg)
+	}
+}
+
+func TestParseBrowsertrixLogLineDeemphasizesFakeLinks(t *testing.T) {
+	line := `{"timestamp":"2026-06-19T00:00:00Z","logLevel":"warn","context":"general","message":"Invalid Page - URL must start with http:// or https://","details":{"url":"javascript:void(0)","page":"https://example.com/post"}}`
+	level, msg := parseBrowsertrixLogLine(line)
+	if level != "debug" {
+		t.Fatalf("level = %q, want debug", level)
+	}
+	if !strings.Contains(msg, "skipped non-page link javascript:void(0) on https://example.com/post") {
 		t.Fatalf("unexpected message: %q", msg)
 	}
 }

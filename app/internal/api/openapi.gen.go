@@ -98,7 +98,7 @@ type CreateArchiveJobRequest struct {
 	Depth           *int    `json:"depth,omitempty"`
 	Enrich          *bool   `json:"enrich,omitempty"`
 
-	// MaxPages Maximum number of pages to capture. Use 0 for unlimited.
+	// MaxPages Maximum number of pages to capture. Use 0 for unlimited. If omitted, same_subdomain and prefix jobs default to unlimited, while other scopes default to 100.
 	MaxPages *int          `json:"maxPages,omitempty"`
 	Prefix   *string       `json:"prefix,omitempty"`
 	Scope    *ArchiveScope `json:"scope,omitempty"`
@@ -128,6 +128,7 @@ type Item struct {
 	CreatedAt    time.Time `json:"createdAt"`
 	Depth        int       `json:"depth"`
 	Id           string    `json:"id"`
+	Replayable   bool      `json:"replayable"`
 	SiteId       string    `json:"siteId"`
 	StatusCode   *int      `json:"statusCode,omitempty"`
 	Summary      *string   `json:"summary,omitempty"`
@@ -146,6 +147,7 @@ type ItemDetail struct {
 	Id              string    `json:"id"`
 	Markdown        *string   `json:"markdown,omitempty"`
 	ReplayUrl       *string   `json:"replayUrl,omitempty"`
+	Replayable      bool      `json:"replayable"`
 	SiteId          string    `json:"siteId"`
 	StatusCode      *int      `json:"statusCode,omitempty"`
 	Summary         *string   `json:"summary,omitempty"`
@@ -178,6 +180,10 @@ type MeResponse struct {
 
 // Settings defines model for Settings.
 type Settings struct {
+	CaptureHeadless            bool     `json:"captureHeadless"`
+	CapturePageDelay           int      `json:"capturePageDelay"`
+	CapturePageRetries         int      `json:"capturePageRetries"`
+	CaptureUseSitemap          bool     `json:"captureUseSitemap"`
 	EnrichmentEnabled          bool     `json:"enrichmentEnabled"`
 	FilterLists                []string `json:"filterLists"`
 	OpenRouterApiKeyConfigured *bool    `json:"openRouterApiKeyConfigured,omitempty"`
@@ -203,11 +209,15 @@ type SiteDetail struct {
 
 // UpdateSettingsRequest defines model for UpdateSettingsRequest.
 type UpdateSettingsRequest struct {
-	EnrichmentEnabled *bool     `json:"enrichmentEnabled,omitempty"`
-	FilterLists       *[]string `json:"filterLists,omitempty"`
-	OpenRouterApiKey  *string   `json:"openRouterApiKey,omitempty"`
-	OpenRouterModel   *string   `json:"openRouterModel,omitempty"`
-	UserAgent         *string   `json:"userAgent,omitempty"`
+	CaptureHeadless    *bool     `json:"captureHeadless,omitempty"`
+	CapturePageDelay   *int      `json:"capturePageDelay,omitempty"`
+	CapturePageRetries *int      `json:"capturePageRetries,omitempty"`
+	CaptureUseSitemap  *bool     `json:"captureUseSitemap,omitempty"`
+	EnrichmentEnabled  *bool     `json:"enrichmentEnabled,omitempty"`
+	FilterLists        *[]string `json:"filterLists,omitempty"`
+	OpenRouterApiKey   *string   `json:"openRouterApiKey,omitempty"`
+	OpenRouterModel    *string   `json:"openRouterModel,omitempty"`
+	UserAgent          *string   `json:"userAgent,omitempty"`
 }
 
 // User defines model for User.
