@@ -805,7 +805,7 @@ function JobPage({ id }: { id: string }) {
                 {job.captureId && job.items?.some((item) => item.replayable) && (
                   <a
                     className="view-button"
-                    href={viewerHref(job.captureId, job.items.find((item) => item.replayable)?.url || job.url)}
+                    href={viewerHref(job.captureId, preferredReplayURL(job))}
                     target="_blank"
                     rel="noreferrer"
                   >
@@ -895,6 +895,42 @@ function VisibilityToggle({
       {error && <span>{error}</span>}
     </div>
   );
+}
+
+function preferredReplayURL(job: ArchiveJobDetail) {
+  const items = job.items || [];
+  const seedURL = normalizeClientURL(job.url);
+  return (
+    items.find((item) => item.replayable && normalizeClientURL(item.url) === seedURL)?.url ||
+    items.find((item) => item.replayable && normalizeClientURL(stripTrailingSlash(item.url)) === normalizeClientURL(stripTrailingSlash(job.url)))?.url ||
+    items.find((item) => item.replayable && item.depth === 0)?.url ||
+    items.find((item) => item.replayable)?.url ||
+    job.url
+  );
+}
+
+function normalizeClientURL(raw: string) {
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    if ((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80")) {
+      url.port = "";
+    }
+    url.hostname = url.hostname.toLowerCase();
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function stripTrailingSlash(raw: string) {
+  try {
+    const url = new URL(raw);
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString();
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
 }
 
 function SitesPage() {

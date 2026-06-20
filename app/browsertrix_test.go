@@ -205,15 +205,8 @@ func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
 	if !ok || len(selectLinks) != 1 || !strings.Contains(selectLinks[0], `:not([href^="javascript:"])`) {
 		t.Fatalf("selectLinks should skip fake anchor URLs: %v", cfg["selectLinks"])
 	}
-	exclude, ok := cfg["scopeExcludeRx"].(string)
-	if !ok || !strings.Contains(exclude, "webp") || !strings.Contains(exclude, "pdf") {
-		t.Fatalf("missing static asset page exclusion regex: %v", cfg["scopeExcludeRx"])
-	}
-	if strings.Contains(exclude, "(?i)") {
-		t.Fatalf("Browsertrix uses JavaScript regexes; inline flags are invalid: %s", exclude)
-	}
-	if _, err := regexp.Compile(exclude); err != nil {
-		t.Fatalf("scopeExcludeRx should compile: %v", err)
+	if exclude, ok := cfg["scopeExcludeRx"]; ok {
+		t.Fatalf("scopeExcludeRx should be omitted without a path filter so subresources remain recordable: %v", exclude)
 	}
 }
 
@@ -257,6 +250,9 @@ func TestBrowsertrixConfigPathExcludeRegex(t *testing.T) {
 	}
 	if rx.MatchString("https://example.com/p/post") {
 		t.Fatalf("scopeExcludeRx should not match article route: %s", exclude)
+	}
+	if rx.MatchString("https://cdn.example.com/app.css") {
+		t.Fatalf("scopeExcludeRx should not block stylesheet subresources: %s", exclude)
 	}
 }
 
@@ -334,6 +330,45 @@ func TestReadBrowsertrixCapturedPagesMarksReplayabilityFromCDX(t *testing.T) {
 	}
 	if captured[1].Replayable {
 		t.Fatalf("pageinfo-only page should not be replayable: %+v", captured[1])
+	}
+}
+
+func TestReadBrowsertrixCapturedPagesMatchesTrailingSlashReplayURL(t *testing.T) {
+	collectionDir := t.TempDir()
+	pagesDir := filepath.Join(collectionDir, "pages")
+	if err := os.MkdirAll(filepath.Join(collectionDir, "indexes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pagesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pages := `{"format":"json-pages-1.0","id":"pages","title":"Seed Pages","hasText":"true"}` + "\n" +
+		`{"id":"p1","url":"https://example.com/p/post","title":"Post","mime":"text/html","status":200,"seed":true,"depth":0,"text":"Post"}` + "\n"
+	if err := os.WriteFile(filepath.Join(pagesDir, "pages.jsonl"), []byte(pages), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cdx, err := os.Create(filepath.Join(collectionDir, "indexes", "index.cdx.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(cdx)
+	_, _ = gz.Write([]byte(`com,example)/p/post/ 20260619000000 {"url":"https://example.com/p/post/","mime":"text/html","status":"200","filename":"test.warc.gz"}` + "\n"))
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cdx.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	captured, err := readBrowsertrixCapturedPages(collectionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("captured pages = %d, want 1", len(captured))
+	}
+	if !captured[0].Replayable {
+		t.Fatalf("page should be replayable via trailing slash variant: %+v", captured[0])
 	}
 }
 

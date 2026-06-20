@@ -297,16 +297,8 @@ func browsertrixScope(opts BrowsertrixCaptureOptions) (scopeType, include string
 	}
 }
 
-func browsertrixPageExcludeRx() string {
-	return `\.(?:avif|bmp|css|eot|gif|gz|ico|jpe?g|js|json|m4v|map|mov|mp3|mp4|otf|pdf|png|rss|svg|tar|ttf|webm|webp|woff2?|xml|zip)(?:[?#].*)?$`
-}
-
 func browsertrixScopeExcludeRx(opts BrowsertrixCaptureOptions) string {
-	parts := []string{browsertrixPageExcludeRx()}
-	if pathExclude := browsertrixPathExcludeRx(opts.PathExcludeRx); pathExclude != "" {
-		parts = append(parts, pathExclude)
-	}
-	return strings.Join(parts, "|")
+	return browsertrixPathExcludeRx(opts.PathExcludeRx)
 }
 
 func browsertrixPathExcludeRx(pathRx string) string {
@@ -388,7 +380,7 @@ func readBrowsertrixCapturedPages(collectionDir string) ([]CapturedPage, error) 
 		if replayable == nil {
 			page.Replayable = true
 		} else {
-			page.Replayable = replayable[key]
+			page.Replayable = browsertrixReplayableURLMatch(replayable, key)
 		}
 		out = append(out, page)
 	}
@@ -457,6 +449,35 @@ func readBrowsertrixReplayableURLsFromGzip(r io.Reader) (map[string]bool, error)
 		}
 	}
 	return replayable, scanner.Err()
+}
+
+func browsertrixReplayableURLMatch(replayable map[string]bool, normalizedURL string) bool {
+	if replayable[normalizedURL] {
+		return true
+	}
+	alt := browsertrixTrailingSlashVariant(normalizedURL)
+	return alt != "" && replayable[alt]
+}
+
+func browsertrixTrailingSlashVariant(normalizedURL string) string {
+	parsed, err := parseURL(normalizedURL)
+	if err != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return ""
+	}
+	if parsed.Path == "" {
+		parsed.Path = "/"
+		return parsed.String()
+	}
+	if parsed.Path == "/" {
+		parsed.Path = ""
+		return parsed.String()
+	}
+	if strings.HasSuffix(parsed.Path, "/") {
+		parsed.Path = strings.TrimRight(parsed.Path, "/")
+	} else {
+		parsed.Path += "/"
+	}
+	return parsed.String()
 }
 
 func browsertrixCDXRecordReplayable(rec browsertrixCDXRecord) bool {
