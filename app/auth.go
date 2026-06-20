@@ -54,7 +54,13 @@ func bootstrapAdmin(ctx context.Context, store *Store) error {
 	if err != nil {
 		return err
 	}
-	user, err := store.CreateUser(ctx, username, email, displayName, hash)
+	user, err := store.CreateUser(ctx, UserCreate{
+		Username:     username,
+		Email:        email,
+		DisplayName:  displayName,
+		PasswordHash: hash,
+		IsAdmin:      true,
+	})
 	if err != nil {
 		return err
 	}

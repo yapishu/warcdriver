@@ -68,7 +68,7 @@ func TestNormalizeArchiveJobAllowsUnlimitedMaxPages(t *testing.T) {
 }
 
 func TestNormalizeArchiveJobAcceptsPathExcludeRegex(t *testing.T) {
-	pathExcludeRx := `^/p/[^/]+/comment(?:[/?#]|$)`
+	pathExcludeRx := `/comment(?:[/?#]|$)`
 	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", PathExcludeRx: &pathExcludeRx}
 	got, err := normalizeArchiveJobRequest(req)
 	if err != nil {

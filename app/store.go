@@ -22,6 +22,9 @@ const (
 	StatusSucceeded = "succeeded"
 	StatusFailed    = "failed"
 	StatusCanceled  = "canceled"
+
+	VisibilityPrivate = "private"
+	VisibilityPublic  = "public"
 )
 
 type Store struct {
@@ -35,6 +38,7 @@ type UserRecord struct {
 	Email        sql.NullString
 	DisplayName  string
 	PasswordHash string
+	IsAdmin      bool
 	CreatedAt    time.Time
 }
 
@@ -55,6 +59,7 @@ type ArchiveJobRecord struct {
 	Prefix          sql.NullString
 	PathExcludeRx   sql.NullString
 	CookieProfileID sql.NullString
+	Visibility      string
 	Enrich          bool
 	Status          string
 	StatusMessage   sql.NullString
@@ -66,13 +71,15 @@ type ArchiveJobRecord struct {
 }
 
 type CaptureRecord struct {
-	ID        string
-	JobID     string
-	SiteID    string
-	StartURL  string
-	Title     sql.NullString
-	WARCPath  string
-	CreatedAt time.Time
+	ID          string
+	JobID       string
+	SiteID      string
+	OwnerUserID sql.NullString
+	StartURL    string
+	Title       sql.NullString
+	WARCPath    string
+	Visibility  string
+	CreatedAt   time.Time
 }
 
 type SiteRecord struct {
@@ -150,6 +157,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			email TEXT UNIQUE,
 			display_name TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
+			is_admin INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
@@ -190,6 +198,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			prefix TEXT,
 			path_exclude_rx TEXT,
 			cookie_profile_id TEXT REFERENCES cookie_profiles(id) ON DELETE SET NULL,
+			visibility TEXT NOT NULL DEFAULT 'private',
 			use_browser_profile INTEGER NOT NULL DEFAULT 0,
 			enrich INTEGER NOT NULL DEFAULT 1,
 			status TEXT NOT NULL,
@@ -212,9 +221,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			job_id TEXT NOT NULL REFERENCES archive_jobs(id) ON DELETE CASCADE,
 			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
 			start_url TEXT NOT NULL,
 			title TEXT,
 			warc_path TEXT NOT NULL,
+			visibility TEXT NOT NULL DEFAULT 'private',
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS items (
@@ -258,6 +269,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureArchiveJobsSchema(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureCapturesSchema(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureReplayabilityBackfill(ctx); err != nil {
 		return err
 	}
@@ -285,7 +299,7 @@ func (s *Store) ensureUsersSchema(ctx context.Context) error {
 	emailCol, hasEmail := cols["email"]
 	_, hasUsername := cols["username"]
 	if hasUsername && hasEmail && !emailCol.NotNull {
-		return nil
+		return s.ensureUserAdminSchema(ctx)
 	}
 
 	users, err := s.usersForMigration(ctx, hasUsername, hasEmail)
@@ -309,14 +323,15 @@ func (s *Store) ensureUsersSchema(ctx context.Context) error {
 		email TEXT UNIQUE,
 		display_name TEXT NOT NULL,
 		password_hash TEXT NOT NULL,
+		is_admin INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL
 	)`); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 	for _, user := range users {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO users_new(id, username, email, display_name, password_hash, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
-			user.ID, user.Username, nullableDBText(user.Email), user.DisplayName, user.PasswordHash, user.CreatedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO users_new(id, username, email, display_name, password_hash, is_admin, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			user.ID, user.Username, nullableDBText(user.Email), user.DisplayName, user.PasswordHash, 0, user.CreatedAt); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -329,7 +344,31 @@ func (s *Store) ensureUsersSchema(ctx context.Context) error {
 		_ = tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.ensureUserAdminSchema(ctx)
+}
+
+func (s *Store) ensureUserAdminSchema(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "users")
+	if err != nil {
+		return err
+	}
+	if _, ok := cols["is_admin"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	var admins int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM users WHERE is_admin != 0`).Scan(&admins); err != nil {
+		return err
+	}
+	if admins > 0 {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE users SET is_admin = 1 WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)`)
+	return err
 }
 
 func (s *Store) tableColumns(ctx context.Context, table string) (map[string]tableColumn, error) {
@@ -371,11 +410,38 @@ func (s *Store) ensureArchiveJobsSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := cols["path_exclude_rx"]; ok {
-		return nil
+	if _, ok := cols["path_exclude_rx"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE archive_jobs ADD COLUMN path_exclude_rx TEXT`); err != nil {
+			return err
+		}
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE archive_jobs ADD COLUMN path_exclude_rx TEXT`)
-	return err
+	if _, ok := cols["visibility"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE archive_jobs ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureCapturesSchema(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "captures")
+	if err != nil {
+		return err
+	}
+	if _, ok := cols["owner_user_id"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE captures ADD COLUMN owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE captures SET owner_user_id = (SELECT user_id FROM archive_jobs WHERE archive_jobs.id = captures.job_id) WHERE owner_user_id IS NULL`); err != nil {
+			return err
+		}
+	}
+	if _, ok := cols["visibility"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE captures ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureReplayabilityBackfill(ctx context.Context) error {
@@ -582,14 +648,48 @@ func (s *Store) UserCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
-func (s *Store) CreateUser(ctx context.Context, username, email, displayName, passwordHash string) (*UserRecord, error) {
+type UserCreate struct {
+	Username     string
+	Email        string
+	DisplayName  string
+	PasswordHash string
+	IsAdmin      bool
+}
+
+type UserUpdate struct {
+	Username     *string
+	Email        *string
+	DisplayName  *string
+	PasswordHash *string
+	IsAdmin      *bool
+}
+
+func (s *Store) ListUsers(ctx context.Context) ([]UserRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, username, email, display_name, password_hash, is_admin, created_at FROM users ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserRecord
+	for rows.Next() {
+		user, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *user)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateUser(ctx context.Context, req UserCreate) (*UserRecord, error) {
 	now := time.Now().UTC()
-	email = strings.TrimSpace(email)
+	email := strings.TrimSpace(req.Email)
 	u := &UserRecord{
 		ID:           uuid.NewString(),
-		Username:     normalizeUsername(username),
-		DisplayName:  strings.TrimSpace(displayName),
-		PasswordHash: passwordHash,
+		Username:     normalizeUsername(req.Username),
+		DisplayName:  strings.TrimSpace(req.DisplayName),
+		PasswordHash: req.PasswordHash,
+		IsAdmin:      req.IsAdmin,
 		CreatedAt:    now,
 	}
 	if email != "" {
@@ -598,8 +698,8 @@ func (s *Store) CreateUser(ctx context.Context, username, email, displayName, pa
 	if u.DisplayName == "" {
 		u.DisplayName = u.Username
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO users(id, username, email, display_name, password_hash, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
-		u.ID, u.Username, nullableDBText(u.Email.String), u.DisplayName, u.PasswordHash, formatTime(now))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO users(id, username, email, display_name, password_hash, is_admin, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Username, nullableDBText(u.Email.String), u.DisplayName, u.PasswordHash, boolInt(u.IsAdmin), formatTime(now))
 	if err != nil {
 		return nil, err
 	}
@@ -607,25 +707,86 @@ func (s *Store) CreateUser(ctx context.Context, username, email, displayName, pa
 }
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*UserRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, username, email, display_name, password_hash, created_at FROM users WHERE username = ?`, normalizeUsername(username))
+	row := s.db.QueryRowContext(ctx, `SELECT id, username, email, display_name, password_hash, is_admin, created_at FROM users WHERE username = ?`, normalizeUsername(username))
 	return scanUser(row)
 }
 
 func (s *Store) GetUserByID(ctx context.Context, id string) (*UserRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, username, email, display_name, password_hash, created_at FROM users WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, username, email, display_name, password_hash, is_admin, created_at FROM users WHERE id = ?`, id)
 	return scanUser(row)
+}
+
+func (s *Store) UpdateUser(ctx context.Context, id string, req UserUpdate) (*UserRecord, error) {
+	set := []string{}
+	args := []any{}
+	if req.Username != nil {
+		set = append(set, "username = ?")
+		args = append(args, normalizeUsername(*req.Username))
+	}
+	if req.Email != nil {
+		set = append(set, "email = ?")
+		args = append(args, nullableDBText(strings.ToLower(strings.TrimSpace(*req.Email))))
+	}
+	if req.DisplayName != nil {
+		displayName := strings.TrimSpace(*req.DisplayName)
+		if displayName == "" && req.Username != nil {
+			displayName = normalizeUsername(*req.Username)
+		}
+		set = append(set, "display_name = ?")
+		args = append(args, displayName)
+	}
+	if req.PasswordHash != nil {
+		set = append(set, "password_hash = ?")
+		args = append(args, *req.PasswordHash)
+	}
+	if req.IsAdmin != nil {
+		set = append(set, "is_admin = ?")
+		args = append(args, boolInt(*req.IsAdmin))
+	}
+	if len(set) > 0 {
+		args = append(args, id)
+		res, err := s.db.ExecContext(ctx, `UPDATE users SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, sql.ErrNoRows
+		}
+	}
+	return s.GetUserByID(ctx, id)
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func scanUser(row interface{ Scan(dest ...any) error }) (*UserRecord, error) {
 	var u UserRecord
 	var created string
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.PasswordHash, &created); err != nil {
+	var isAdmin int
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.PasswordHash, &isAdmin, &created); err != nil {
 		return nil, err
 	}
 	t, err := parseTime(created)
 	if err != nil {
 		return nil, err
 	}
+	u.IsAdmin = isAdmin != 0
 	u.CreatedAt = t
 	return &u, nil
 }
@@ -762,15 +923,16 @@ func (s *Store) CreateArchiveJob(ctx context.Context, userID string, req Archive
 		return nil, err
 	}
 	rec := &ArchiveJobRecord{
-		ID:        uuid.NewString(),
-		URL:       req.URL,
-		URLsJSON:  string(urlsJSON),
-		Scope:     req.Scope,
-		Depth:     req.Depth,
-		MaxPages:  req.MaxPages,
-		Enrich:    req.Enrich,
-		Status:    StatusQueued,
-		CreatedAt: now,
+		ID:         uuid.NewString(),
+		URL:        req.URL,
+		URLsJSON:   string(urlsJSON),
+		Scope:      req.Scope,
+		Depth:      req.Depth,
+		MaxPages:   req.MaxPages,
+		Visibility: normalizeVisibility(req.Visibility),
+		Enrich:     req.Enrich,
+		Status:     StatusQueued,
+		CreatedAt:  now,
 	}
 	if userID != "" {
 		rec.UserID = sql.NullString{String: userID, Valid: true}
@@ -786,10 +948,10 @@ func (s *Store) CreateArchiveJob(ctx context.Context, userID string, req Archive
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO archive_jobs(
 			id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			use_browser_profile, enrich, status, created_at
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			visibility, use_browser_profile, enrich, status, created_at
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.UserID, rec.URL, rec.URLsJSON, rec.Scope, rec.Depth, rec.MaxPages,
-		rec.Prefix, rec.PathExcludeRx, rec.CookieProfileID, 0, boolInt(rec.Enrich),
+		rec.Prefix, rec.PathExcludeRx, rec.CookieProfileID, rec.Visibility, 0, boolInt(rec.Enrich),
 		rec.Status, formatTime(now))
 	return rec, err
 }
@@ -803,6 +965,7 @@ type ArchiveJobCreate struct {
 	Prefix          string
 	PathExcludeRx   string
 	CookieProfileID string
+	Visibility      string
 	Enrich          bool
 }
 
@@ -814,7 +977,7 @@ func (s *Store) ClaimNextArchiveJob(ctx context.Context) (*ArchiveJobRecord, err
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
+			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
 		FROM archive_jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1`, StatusQueued)
 	rec, err := scanArchiveJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -846,14 +1009,14 @@ func (s *Store) RequeueRunningJobs(ctx context.Context) error {
 
 func (s *Store) GetArchiveJob(ctx context.Context, id string) (*ArchiveJobRecord, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
+			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
 		FROM archive_jobs WHERE id = ?`, id)
 	return scanArchiveJob(row)
 }
 
 func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
+			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
 		FROM archive_jobs ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -870,13 +1033,46 @@ func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRec
 	return out, rows.Err()
 }
 
+func (s *Store) ListArchiveJobsVisible(ctx context.Context, user *UserRecord, limit int) ([]ArchiveJobRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	rows, err := s.db.QueryContext(ctx, `SELECT j.id, j.user_id, j.url, j.urls_json, j.scope, j.depth, j.max_pages, j.prefix, j.path_exclude_rx, j.cookie_profile_id,
+			j.visibility, j.use_browser_profile, j.enrich, j.status, j.status_message, j.error, j.capture_id, j.created_at, j.started_at, j.finished_at
+		FROM archive_jobs j
+		LEFT JOIN captures c ON c.id = j.capture_id
+		WHERE ? = 1 OR j.user_id = ? OR c.visibility = 'public'
+		ORDER BY j.created_at DESC LIMIT ?`, boolInt(isAdmin), userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArchiveJobRecord
+	for rows.Next() {
+		rec, err := scanArchiveJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetArchiveJobVisible(ctx context.Context, id string, user *UserRecord) (*ArchiveJobRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	row := s.db.QueryRowContext(ctx, `SELECT j.id, j.user_id, j.url, j.urls_json, j.scope, j.depth, j.max_pages, j.prefix, j.path_exclude_rx, j.cookie_profile_id,
+			j.visibility, j.use_browser_profile, j.enrich, j.status, j.status_message, j.error, j.capture_id, j.created_at, j.started_at, j.finished_at
+		FROM archive_jobs j
+		LEFT JOIN captures c ON c.id = j.capture_id
+		WHERE j.id = ? AND (? = 1 OR j.user_id = ? OR c.visibility = 'public')`, id, boolInt(isAdmin), userID)
+	return scanArchiveJob(row)
+}
+
 func scanArchiveJob(row interface{ Scan(dest ...any) error }) (*ArchiveJobRecord, error) {
 	var rec ArchiveJobRecord
 	var created string
 	var started, finished sql.NullString
 	var ignoredUseProfile, enrich int
 	err := row.Scan(&rec.ID, &rec.UserID, &rec.URL, &rec.URLsJSON, &rec.Scope, &rec.Depth, &rec.MaxPages,
-		&rec.Prefix, &rec.PathExcludeRx, &rec.CookieProfileID, &ignoredUseProfile, &enrich, &rec.Status, &rec.StatusMessage,
+		&rec.Prefix, &rec.PathExcludeRx, &rec.CookieProfileID, &rec.Visibility, &ignoredUseProfile, &enrich, &rec.Status, &rec.StatusMessage,
 		&rec.Error, &rec.CaptureID, &created, &started, &finished)
 	if err != nil {
 		return nil, err
@@ -886,6 +1082,7 @@ func scanArchiveJob(row interface{ Scan(dest ...any) error }) (*ArchiveJobRecord
 		return nil, err
 	}
 	rec.CreatedAt = t
+	rec.Visibility = normalizeVisibility(rec.Visibility)
 	rec.Enrich = enrich != 0
 	if started.Valid {
 		if t, err := parseTime(started.String); err == nil {
@@ -1015,6 +1212,17 @@ func (s *Store) GetSite(ctx context.Context, id string) (*SiteRecord, error) {
 	return scanSite(row)
 }
 
+func (s *Store) GetSiteVisible(ctx context.Context, id string, user *UserRecord) (*SiteRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+		FROM sites s
+		JOIN items i ON i.site_id = s.id
+		JOIN captures c ON c.id = i.capture_id
+		WHERE s.id = ? AND (? = 1 OR c.owner_user_id = ? OR c.visibility = 'public')
+		GROUP BY s.id`, id, boolInt(isAdmin), userID)
+	return scanSite(row)
+}
+
 func (s *Store) DeleteSite(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM sites WHERE id = ?`, id)
 	if err != nil {
@@ -1048,6 +1256,30 @@ func (s *Store) ListSites(ctx context.Context, limit int) ([]SiteRecord, error) 
 	return out, rows.Err()
 }
 
+func (s *Store) ListSitesVisible(ctx context.Context, user *UserRecord, limit int) ([]SiteRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+		FROM sites s
+		JOIN items i ON i.site_id = s.id
+		JOIN captures c ON c.id = i.capture_id
+		WHERE ? = 1 OR c.owner_user_id = ? OR c.visibility = 'public'
+		GROUP BY s.id
+		ORDER BY s.updated_at DESC LIMIT ?`, boolInt(isAdmin), userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SiteRecord
+	for rows.Next() {
+		rec, err := scanSite(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
 func scanSite(row interface{ Scan(dest ...any) error }) (*SiteRecord, error) {
 	var rec SiteRecord
 	var created, updated string
@@ -1064,30 +1296,71 @@ func scanSite(row interface{ Scan(dest ...any) error }) (*SiteRecord, error) {
 	return &rec, nil
 }
 
-func (s *Store) CreateCapture(ctx context.Context, jobID, siteID, startURL, title, warcPath string) (*CaptureRecord, error) {
+func (s *Store) CreateCapture(ctx context.Context, jobID, siteID, ownerUserID, startURL, title, warcPath, visibility string) (*CaptureRecord, error) {
 	now := time.Now().UTC()
 	rec := &CaptureRecord{
-		ID:        uuid.NewString(),
-		JobID:     jobID,
-		SiteID:    siteID,
-		StartURL:  startURL,
-		WARCPath:  warcPath,
-		CreatedAt: now,
+		ID:         uuid.NewString(),
+		JobID:      jobID,
+		SiteID:     siteID,
+		StartURL:   startURL,
+		WARCPath:   warcPath,
+		Visibility: normalizeVisibility(visibility),
+		CreatedAt:  now,
+	}
+	if ownerUserID != "" {
+		rec.OwnerUserID = sql.NullString{String: ownerUserID, Valid: true}
 	}
 	if title != "" {
 		rec.Title = sql.NullString{String: title, Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO captures(id, job_id, site_id, start_url, title, warc_path, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
-		rec.ID, rec.JobID, rec.SiteID, rec.StartURL, rec.Title, rec.WARCPath, formatTime(now))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO captures(id, job_id, site_id, owner_user_id, start_url, title, warc_path, visibility, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.JobID, rec.SiteID, rec.OwnerUserID, rec.StartURL, rec.Title, rec.WARCPath, rec.Visibility, formatTime(now))
 	return rec, err
 }
 
 func (s *Store) GetCapture(ctx context.Context, id string) (*CaptureRecord, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, site_id, owner_user_id, start_url, title, warc_path, visibility, created_at FROM captures WHERE id = ?`, id)
+	return scanCapture(row)
+}
+
+func (s *Store) GetCaptureVisible(ctx context.Context, id string, user *UserRecord) (*CaptureRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, site_id, owner_user_id, start_url, title, warc_path, visibility, created_at
+		FROM captures WHERE id = ? AND (? = 1 OR owner_user_id = ? OR visibility = 'public')`, id, boolInt(isAdmin), userID)
+	return scanCapture(row)
+}
+
+func (s *Store) UpdateCaptureVisibility(ctx context.Context, id, visibility string) (*CaptureRecord, error) {
+	visibility = normalizeVisibility(visibility)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE captures SET visibility = ? WHERE id = ?`, visibility, id)
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE archive_jobs SET visibility = ? WHERE capture_id = ?`, visibility, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.GetCapture(ctx, id)
+}
+
+func scanCapture(row interface{ Scan(dest ...any) error }) (*CaptureRecord, error) {
 	var rec CaptureRecord
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, job_id, site_id, start_url, title, warc_path, created_at FROM captures WHERE id = ?`, id).
-		Scan(&rec.ID, &rec.JobID, &rec.SiteID, &rec.StartURL, &rec.Title, &rec.WARCPath, &created)
-	if err != nil {
+	if err := row.Scan(&rec.ID, &rec.JobID, &rec.SiteID, &rec.OwnerUserID, &rec.StartURL, &rec.Title, &rec.WARCPath, &rec.Visibility, &created); err != nil {
 		return nil, err
 	}
 	t, err := parseTime(created)
@@ -1095,6 +1368,7 @@ func (s *Store) GetCapture(ctx context.Context, id string) (*CaptureRecord, erro
 		return nil, err
 	}
 	rec.CreatedAt = t
+	rec.Visibility = normalizeVisibility(rec.Visibility)
 	return &rec, nil
 }
 
@@ -1139,6 +1413,16 @@ func (s *Store) UpdateItemEnrichment(ctx context.Context, itemID, summary string
 func (s *Store) GetItem(ctx context.Context, id string) (*ItemRecord, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
 			replayable, depth, status_code, content_type, markdown_path, created_at FROM items WHERE id = ?`, id)
+	return scanItem(row)
+}
+
+func (s *Store) GetItemVisible(ctx context.Context, id string, user *UserRecord) (*ItemRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	row := s.db.QueryRowContext(ctx, `SELECT i.id, i.job_id, i.capture_id, i.site_id, i.url, i.canonical_url, i.title, i.summary, i.tags_json,
+			i.replayable, i.depth, i.status_code, i.content_type, i.markdown_path, i.created_at
+		FROM items i
+		JOIN captures c ON c.id = i.capture_id
+		WHERE i.id = ? AND (? = 1 OR c.owner_user_id = ? OR c.visibility = 'public')`, id, boolInt(isAdmin), userID)
 	return scanItem(row)
 }
 
@@ -1187,13 +1471,74 @@ func (s *Store) ListItems(ctx context.Context, siteID, query string, limit int) 
 	return out, rows.Err()
 }
 
+func (s *Store) ListItemsVisible(ctx context.Context, user *UserRecord, siteID, query string, limit int) ([]ItemRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	args := []any{boolInt(isAdmin), userID}
+	where := []string{"(? = 1 OR c.owner_user_id = ? OR c.visibility = 'public')"}
+	if siteID != "" {
+		where = append(where, "i.site_id = ?")
+		args = append(args, siteID)
+	}
+	if strings.TrimSpace(query) != "" {
+		where = append(where, "(i.url LIKE ? OR i.title LIKE ? OR i.summary LIKE ?)")
+		q := "%" + strings.TrimSpace(query) + "%"
+		args = append(args, q, q, q)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.job_id, i.capture_id, i.site_id, i.url, i.canonical_url, i.title, i.summary, i.tags_json,
+			i.replayable, i.depth, i.status_code, i.content_type, i.markdown_path, i.created_at
+		FROM items i
+		JOIN captures c ON c.id = i.capture_id
+		WHERE `+strings.Join(where, " AND ")+` ORDER BY i.created_at DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ItemRecord
+	for rows.Next() {
+		rec, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListItemsForSite(ctx context.Context, siteID string, limit int) ([]ItemRecord, error) {
 	return s.ListItems(ctx, siteID, "", limit)
+}
+
+func (s *Store) ListItemsForSiteVisible(ctx context.Context, siteID string, user *UserRecord, limit int) ([]ItemRecord, error) {
+	return s.ListItemsVisible(ctx, user, siteID, "", limit)
 }
 
 func (s *Store) ListItemsForJob(ctx context.Context, jobID string) ([]ItemRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
 			replayable, depth, status_code, content_type, markdown_path, created_at FROM items WHERE job_id = ? ORDER BY depth ASC, created_at ASC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ItemRecord
+	for rows.Next() {
+		rec, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListItemsForJobVisible(ctx context.Context, jobID string, user *UserRecord) ([]ItemRecord, error) {
+	userID, isAdmin := accessArgs(user)
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.job_id, i.capture_id, i.site_id, i.url, i.canonical_url, i.title, i.summary, i.tags_json,
+			i.replayable, i.depth, i.status_code, i.content_type, i.markdown_path, i.created_at
+		FROM items i
+		JOIN captures c ON c.id = i.capture_id
+		WHERE i.job_id = ? AND (? = 1 OR c.owner_user_id = ? OR c.visibility = 'public')
+		ORDER BY i.depth ASC, i.created_at ASC`, jobID, boolInt(isAdmin), userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1256,4 +1601,18 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func accessArgs(user *UserRecord) (string, bool) {
+	if user == nil {
+		return "", false
+	}
+	return user.ID, user.IsAdmin
+}
+
+func normalizeVisibility(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), VisibilityPublic) {
+		return VisibilityPublic
+	}
+	return VisibilityPrivate
 }

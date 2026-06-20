@@ -1,8 +1,6 @@
 # WARCdriver
 
-WARCdriver is a personal web archive service. It accepts authenticated archive jobs, drives Browsertrix Crawler for high-fidelity WARC/WACZ capture, indexes captured pages in SQLite, and serves a small authenticated catalog UI with embedded replay.
-
-The current Go service lives in `app/`. The Urbit desk in `desk/` is not part of this rebuild.
+WARCdriver is a self-hosted personal web archive. It accepts authenticated capture jobs, runs Browsertrix Crawler, stores WACZ/WARC files and markdown extracts, indexes captured pages in SQLite, and serves a catalog UI with embedded replay.
 
 ## Run
 
@@ -14,101 +12,93 @@ export WARC_ADMIN_PASSWORD="choose-a-real-password"
 docker compose up -d --build
 ```
 
-Open `http://localhost:8808/` and log in with the admin account.
+Open `http://localhost:8808/` and log in with the bootstrap admin account.
 
-If `WARC_ADMIN_PASSWORD` is not set on first boot, WARCdriver creates `admin` with a generated password and prints it to the container logs. `WARC_ADMIN_EMAIL` is optional.
+## Captures
+
+The capture form creates Browsertrix jobs. Useful fields:
+
+- `URL`: seed URL.
+- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`.
+- `Depth`: link traversal depth. Broad scopes use `All`.
+- `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
+- `Path exclude regex`: a regular expression matched against URL paths before pages are queued, for example `^/(login|cart)(?:/|$)`.
+- `Cookies`: optional saved cookie profile.
+- `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
+- `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
+
+Public captures use unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access.
+
+## Cookies
+
+Use Settings -> Cookie profiles to store cookies for authenticated captures. Supported import formats:
+
+- Cookie-Editor JSON export.
+- Netscape `cookies.txt`.
+- Raw `Cookie` header.
+
+Recommended flow:
+
+1. Install Cookie-Editor in your browser.
+2. Open the authenticated site.
+3. Export cookies as JSON.
+4. Add a WARCdriver cookie profile with source `JSON` and an optional host filter.
+5. Select that profile when capturing.
+
+Cookie profiles are stored in SQLite under `DATA_DIR`. WACZ/WARC output is not scrubbed after capture, so authenticated captures may contain sensitive request or response data.
 
 ## API
 
-The API is defined in `openapi.yaml`; generated Go route/types code is in `app/internal/api/openapi.gen.go`.
+The API is defined in `openapi.yaml`; generated Go bindings live in `app/internal/api/openapi.gen.go`.
 
-Create an archive job:
+Example job:
 
 ```bash
 curl -X POST http://localhost:8808/api/archive-jobs \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $WARC_API_TOKEN" \
-  -d '{"url":"https://example.com/","scope":"single_page","depth":0,"maxPages":100}'
+  -d '{
+    "url": "https://example.com/",
+    "scope": "single_page",
+    "maxPages": 100,
+    "visibility": "private"
+  }'
 ```
 
-The old `/archive` and `/crawl` prototype endpoints have been removed. Use `/api/archive-jobs`.
+Admin users can manage accounts at `/api/users` and from the Users screen. There is no public registration.
 
-Capture scopes:
+## Environment
 
-- `single_page` captures the seed page and embedded resources only.
-- `linked_pages` follows discovered links across any host up to `depth`, bounded by `maxPages`.
-- `same_subdomain` crawls the seed host/subdomain with unlimited depth, bounded by `maxPages`.
-- `prefix` crawls URLs under the requested prefix with unlimited depth, bounded by `maxPages`.
-- `explicit_urls` captures the provided URL list as individual pages.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PUID` | `1000` | Host UID used by compose services. |
+| `PGID` | `1000` | Host GID used by compose services. |
+| `DATA_DIR` | `/data` | Data directory for SQLite, WACZ/WARC files, markdown, filters, and Browsertrix queues. |
+| `ADDR` | `:8808` | HTTP listen address for the Go service. |
+| `ARCHIVE_WORKERS` | `1` | Number of archive job workers in the Go service. |
+| `WARC_ADMIN_USERNAME` | `admin` | Username for the first bootstrapped admin. |
+| `WARC_ADMIN_EMAIL` | empty | Optional email for the first admin. |
+| `WARC_ADMIN_NAME` | username | Display name for the first admin. |
+| `WARC_ADMIN_PASSWORD` | generated | Password for the first admin. Generated and logged if unset. |
+| `WARC_API_TOKEN` | empty | Optional bootstrap bearer token, stored hashed. |
+| `OPENROUTER_API_KEY` | empty | API key for summary/tag enrichment. |
+| `OPENROUTER_MODEL` | `openrouter/auto` | Model used for enrichment. |
+| `COOKIE_SECURE` | `auto` | Session cookie Secure flag: `auto`, `true`, or `false`. |
+| `CAPTURE_USER_AGENT` | empty | Optional Browsertrix user-agent override. |
+| `CAPTURE_HEADLESS` | `false` | Browsertrix browser mode default. `false` uses headed mode under Xvfb. |
+| `CAPTURE_PAGE_DELAY` | `3` | Seconds Browsertrix waits between pages. |
+| `CAPTURE_PAGE_RETRIES` | `0` | Browsertrix page retry count. |
+| `CAPTURE_USE_SITEMAP` | `true` | Enables sitemap discovery for broad uncapped crawls. |
+| `BROWSERTRIX_QUEUE_DIR` | `/data/browsertrix/jobs` | Sidecar job queue directory. |
+| `BROWSERTRIX_RUNS_DIR` | `/data/browsertrix/runs` | Browsertrix output directory. |
+| `BROWSERTRIX_POLL_INTERVAL` | `1` | Sidecar queue polling interval in seconds. |
+| `BROWSERTRIX_CANCEL_GRACE_SECONDS` | `30` | Grace period before a canceled Browsertrix process is terminated. |
 
-Set `maxPages` to `0` to remove the page-count cap. This is intended for whole-publication crawls such as a single Substack subdomain; use the job cancel button if a run gets too broad. If `maxPages` is omitted, `same_subdomain` and `prefix` jobs default to unlimited, while other scopes default to 100 pages.
+Compose exposes `warcdriver` on port `8808`, runs both main containers with `PUID:PGID`, and initializes `./data` ownership before startup.
 
-Archive jobs also accept `pathExcludeRx`, a regular expression matched against URL paths before Browsertrix queues pages. The capture form's "Skip comments" checkbox sends `^/p/[^/]+/comment(?:[/?#]|$)`, which drops Substack article comment routes such as `/p/post/comment/123` while keeping the article page itself.
+## Data Layout
 
-## Auth
-
-- Browser auth uses SQLite users plus HTTP-only session cookies.
-- Automation auth uses bearer tokens stored hashed in SQLite.
-- A bootstrap API token can be seeded on first boot with `WARC_API_TOKEN`.
-- `COOKIE_SECURE=auto` is the default. Local plain HTTP works, and TLS deployments get secure session cookies when the proxy forwards `X-Forwarded-Proto: https` or `Forwarded: proto=https`.
-
-## Capture engine
-
-Browsertrix is the only capture engine. Compose starts a `browsertrix-worker` sidecar that watches `./data/browsertrix/jobs`, runs Browsertrix without needing the Docker socket, and writes WACZ/WARC output under `./data/browsertrix/runs`.
-
-The Browsertrix image currently launches Brave. WARCdriver defaults to Browsertrix's headed mode under Xvfb (`capture_headless=false`) because it tends to look less like automation than Chrome/Brave headless. Set `CAPTURE_HEADLESS=true` or enable the Headless browser setting if you prefer headless mode.
-
-WARCdriver stores one capture record per Browsertrix run, so a site crawl is one WACZ collection even when many pages are indexed from it. During import, WARCdriver reads Browsertrix's CDX and marks catalog items as replayable only when the WACZ contains a real HTTP response for that page URL. Browsertrix can sometimes write useful `pages.jsonl` text for client-side routes while only storing `urn:pageinfo:*` records; those entries remain searchable but do not get a View button because WABAC cannot replay them as top-level pages.
-
-Capture pacing is configurable in Settings or via environment:
-
-- `CAPTURE_PAGE_DELAY` defaults to `3` seconds between Browsertrix pages.
-- `CAPTURE_PAGE_RETRIES` defaults to `0` to avoid fast retry storms on invalid-status pages.
-- `CAPTURE_USE_SITEMAP` defaults to `true`, but WARCdriver only enables Browsertrix sitemap discovery for uncapped or broad same-subdomain crawls so small capped crawls do not spend the entire page budget on sitemap URLs.
-
-## Cookies and profiles
-
-Cookie profiles can be created from the UI or API using:
-
-- raw `Cookie` header,
-- Netscape `cookies.txt`,
-- JSON cookie exports.
-
-When a cookie profile is selected for a capture, WARCdriver converts matching cookies into a temporary Browsertrix Chromium profile for that job. The profile is generated under `DATA_DIR/browsertrix/jobs/<job-id>/`, is not mounted from your host browser, and is removed after the capture attempt returns.
-
-Cookie profiles are stored credential material in SQLite and should be protected with the rest of `DATA_DIR`. WACZ/WARC artifacts are not scrubbed after capture because that can break WACZ indexes and replay integrity; do not share authenticated captures unless you are comfortable with the archive containing request/response metadata from that session.
-
-Use [Cookie-Editor](https://cookie-editor.com/) for manual export:
-
-1. Install Cookie-Editor in Brave/Chrome/Firefox.
-2. Open the authenticated site in that browser.
-3. Click Cookie-Editor and export/copy cookies as JSON.
-4. In WARCdriver, open Settings, add a cookie profile, select `JSON`, set the host to the target host such as `eventsinukraine.substack.com`, and paste the export into Content.
-5. Select that cookie profile when creating a capture.
-
-Cookie-Editor is open-source and supports the major browsers. Its JSON export preserves cookie attributes.
-
-## Browser backends
-
-The backend is Browsertrix Crawler. Chrome 132 removed the old headless implementation from the main Chrome binary, but Browsertrix uses maintained browser automation underneath and packages the crawl output as WACZ/WARC.
-
-Obscura and Lightpanda are worth tracking as optional future backends because both advertise modern browser automation surfaces. They should not replace Browsertrix as the default until their crawl fidelity and WARC/WACZ output are proven against real authenticated sites.
-
-## Browser fingerprint
-
-Set `CAPTURE_USER_AGENT` or edit Settings if you want to force a specific user agent string for Browsertrix captures.
-
-## Filtering and enrichment
-
-- EasyList and EasyPrivacy are downloaded, cached under `DATA_DIR/filters`, and compiled with the AdGuard URL filter engine.
-- Browsertrix captures run with ad blocking enabled when filter lists are loaded.
-- OpenRouter enrichment runs after capture when an API key is configured. It stores a one-sentence summary and tags for catalog indexing.
-
-## Data
-
-`DATA_DIR` defaults to `/data` in the container and is mounted from `./data`.
-
-Stored artifacts:
+`DATA_DIR` contains:
 
 - `warcdriver.sqlite3`
 - `browsertrix/jobs/*`
@@ -118,13 +108,7 @@ Stored artifacts:
 
 ## Development
 
-```bash
-cd app
-go test ./...
-go build ./...
-```
-
-Frontend source is in `frontend/` and targets Node 24:
+Frontend:
 
 ```bash
 cd frontend
@@ -133,9 +117,15 @@ npm install
 npm run build
 ```
 
-The production build is embedded by copying `frontend/dist` to `app/frontend/dist`. Docker does this automatically.
+Backend:
 
-Regenerate OpenAPI bindings after editing `openapi.yaml`:
+```bash
+cd app
+go test ./...
+go build ./...
+```
+
+Regenerate API bindings after editing `openapi.yaml`:
 
 ```bash
 cd app
@@ -143,4 +133,4 @@ go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 \
   -config oapi-codegen.yaml ../openapi.yaml
 ```
 
-The rebuild plan and remaining work are tracked in `docs/warcdriver-rebuild-plan.md`.
+For local non-Docker builds, copy `frontend/dist` to `app/frontend/dist` before `go test` or `go build`.

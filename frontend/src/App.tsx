@@ -38,7 +38,8 @@ import type {
   ItemDetail,
   Settings as SettingsType,
   Site,
-  User
+  User,
+  Visibility
 } from "./types";
 
 type Route =
@@ -49,6 +50,7 @@ type Route =
   | { name: "site"; id: string }
   | { name: "items" }
   | { name: "item"; id: string }
+  | { name: "users" }
   | { name: "settings" }
   | { name: "viewer"; id: string };
 
@@ -71,13 +73,13 @@ const routeLinks = [
   { route: "jobs", label: "Queue", icon: Clock3 },
   { route: "sites", label: "Sites", icon: Globe2 },
   { route: "items", label: "Index", icon: BookOpen },
+  { route: "users", label: "Users", icon: Shield, adminOnly: true },
   { route: "settings", label: "Settings", icon: Settings }
 ];
 
 const replayDarkModeKey = "warcdriver.replayDarkMode";
 const replayChromeHiddenKey = "warcdriver.replayChromeHidden";
 const cookieProfilesChangedEvent = "warcdriver:cookie-profiles-changed";
-const commentPathExcludeRx = "^/p/[^/]+/comment(?:[/?#]|$)";
 
 const replayFrameDarkCSS = `
   :root {
@@ -364,11 +366,15 @@ export function App() {
   const [route, setRoute] = useState<Route>(parseRoute());
 
   useEffect(() => {
+    if (route.name === "viewer") {
+      setBoot({ state: "error", error: "viewer" });
+      return;
+    }
     api
       .me()
       .then(({ user }) => setBoot({ state: "ready", data: user }))
       .catch(() => setBoot({ state: "error", error: "login" }));
-  }, []);
+  }, [route.name]);
 
   useEffect(() => {
     const onHash = () => setRoute(parseRoute());
@@ -382,9 +388,9 @@ export function App() {
     setBoot({ state: "error", error: "login" });
   };
 
+  if (route.name === "viewer") return <ReplayPage id={route.id} />;
   if (boot.state === "loading") return <BootScreen />;
   if (boot.state !== "ready") return <LoginScreen onLogin={onLogin} />;
-  if (route.name === "viewer") return <ReplayPage id={route.id} />;
 
   return (
     <Frame user={boot.data} route={route} onLogout={onLogout}>
@@ -403,6 +409,7 @@ function parseRoute(): Route {
   if (parts[0] === "sites") return { name: "sites" };
   if (parts[0] === "items" && parts[1]) return { name: "item", id: parts[1] };
   if (parts[0] === "items") return { name: "items" };
+  if (parts[0] === "users") return { name: "users" };
   if (parts[0] === "settings") return { name: "settings" };
   if (parts[0] === "viewer" && parts[1]) return { name: "viewer", id: parts[1] };
   return { name: "dashboard" };
@@ -503,7 +510,7 @@ function Frame({
           <span>WARCdriver</span>
         </a>
         <nav className="side-nav">
-          {routeLinks.map((link) => {
+          {routeLinks.filter((link) => !link.adminOnly || user.isAdmin).map((link) => {
             const Icon = link.icon;
             const active =
               route.name === link.route ||
@@ -565,12 +572,14 @@ function CaptureDock() {
       scope,
       depth,
       maxPages: unlimitedPages ? 0 : Number(form.get("maxPages") || 100),
+      visibility: String(form.get("visibility") || "private") as Visibility,
       enrich: form.get("enrich") === "on"
     };
     const prefix = String(form.get("prefix") || "").trim();
+    const pathExcludeRx = String(form.get("pathExcludeRx") || "").trim();
     const cookieProfileId = String(form.get("cookieProfileId") || "").trim();
     if (prefix) payload.prefix = prefix;
-    if (form.get("skipComments") === "on") payload.pathExcludeRx = commentPathExcludeRx;
+    if (pathExcludeRx) payload.pathExcludeRx = pathExcludeRx;
     if (cookieProfileId) payload.cookieProfileId = cookieProfileId;
     try {
       const job = await api.createJob(payload);
@@ -672,13 +681,20 @@ function CaptureDock() {
               ))}
             </select>
           </label>
+          <label className="visibility-field">
+            Visibility
+            <select name="visibility" defaultValue="private">
+              <option value="private">Private</option>
+              <option value="public">Public</option>
+            </select>
+          </label>
           <label className="prefix-field">
             Prefix
             <input name="prefix" type="url" placeholder="optional" />
           </label>
-          <label className="check-field">
-            <input name="skipComments" type="checkbox" defaultChecked />
-            Skip comments
+          <label className="path-filter-field">
+            Path exclude regex
+            <input name="pathExcludeRx" type="text" placeholder="optional, e.g. ^/(login|cart)(?:/|$)" spellCheck={false} />
           </label>
           <label className="check-field">
             <input name="enrich" type="checkbox" defaultChecked />
@@ -698,6 +714,7 @@ function Page({ route }: { route: Route }) {
   if (route.name === "site") return <SitePage id={route.id} />;
   if (route.name === "items") return <ItemsPage />;
   if (route.name === "item") return <ItemPage id={route.id} />;
+  if (route.name === "users") return <UsersPage />;
   if (route.name === "settings") return <SettingsPage />;
   if (route.name === "viewer") return <ReplayPage id={route.id} />;
   return <DashboardPage />;
@@ -758,7 +775,8 @@ function JobsPage() {
 }
 
 function JobPage({ id }: { id: string }) {
-  const load = useLoader(() => api.job(id), [id], 4000);
+  const [refresh, setRefresh] = useState(0);
+  const load = useLoader(() => api.job(id), [id, refresh], 4000);
   async function cancelJob() {
     await api.cancelJob(id);
   }
@@ -777,6 +795,13 @@ function JobPage({ id }: { id: string }) {
             aside={
               <div className="action-row">
                 <StatusPill status={job.status} />
+                {job.captureId && (
+                  <VisibilityToggle
+                    captureId={job.captureId}
+                    visibility={job.visibility}
+                    onChanged={() => setRefresh((value) => value + 1)}
+                  />
+                )}
                 {job.captureId && job.items?.some((item) => item.replayable) && (
                   <a
                     className="view-button"
@@ -830,6 +855,45 @@ function JobPage({ id }: { id: string }) {
         </>
       )}
     </Resource>
+  );
+}
+
+function VisibilityToggle({
+  captureId,
+  visibility,
+  onChanged
+}: {
+  captureId: string;
+  visibility: Visibility;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function change(next: Visibility) {
+    setBusy(true);
+    setError("");
+    try {
+      await api.updateWarcVisibility(captureId, next);
+      onChanged();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="visibility-toggle">
+      <select
+        aria-label="Archive visibility"
+        value={visibility}
+        disabled={busy}
+        onChange={(event) => change(event.target.value as Visibility)}
+      >
+        <option value="private">Private</option>
+        <option value="public">Public</option>
+      </select>
+      {error && <span>{error}</span>}
+    </div>
   );
 }
 
@@ -996,6 +1060,189 @@ function SettingsPage() {
         </>
       )}
     </Resource>
+  );
+}
+
+function UsersPage() {
+  const [refresh, setRefresh] = useState(0);
+  const load = useLoader(() => api.users().then((data) => data.users), [refresh]);
+  return (
+    <Resource load={load}>
+      {(users) => (
+        <>
+          <PageHeader eyebrow="Admin" title="Users" />
+          <section className="settings-stack">
+            <CreateUserPanel onChanged={() => setRefresh((v) => v + 1)} />
+            <UsersPanel users={users} onChanged={() => setRefresh((v) => v + 1)} />
+          </section>
+        </>
+      )}
+    </Resource>
+  );
+}
+
+function CreateUserPanel({ onChanged }: { onChanged: () => void }) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
+    try {
+      await api.createUser({
+        username: String(form.get("username") || ""),
+        email: valueOrUndefined(form.get("email")),
+        displayName: valueOrUndefined(form.get("displayName")),
+        password: String(form.get("password") || ""),
+        isAdmin: form.get("isAdmin") === "on"
+      });
+      formEl.reset();
+      onChanged();
+    } catch (err) {
+      setMessage(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Panel title="Create user" action={<KeyRound size={16} />}>
+      <form className="settings-form user-form" onSubmit={submit}>
+        <div className="form-pair">
+          <label>
+            Username
+            <input name="username" autoComplete="off" required />
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autoComplete="new-password" minLength={8} required />
+          </label>
+        </div>
+        <div className="form-pair">
+          <label>
+            Email
+            <input name="email" type="email" autoComplete="off" />
+          </label>
+          <label>
+            Display name
+            <input name="displayName" autoComplete="off" />
+          </label>
+        </div>
+        <label className="check-line">
+          <input name="isAdmin" type="checkbox" />
+          Admin
+        </label>
+        {message && <div className="form-error">{message}</div>}
+        <button className="primary-button" disabled={busy}>
+          {busy ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
+          Create
+        </button>
+      </form>
+    </Panel>
+  );
+}
+
+function UsersPanel({ users, onChanged }: { users: User[]; onChanged: () => void }) {
+  if (!users.length) return <Panel title="Accounts"><Empty icon={<Shield size={22} />} label="No users" /></Panel>;
+  return (
+    <Panel title="Accounts">
+      <div className="user-list">
+        {users.map((user) => (
+          <UserRow key={user.id} user={user} onChanged={onChanged} />
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    const form = new FormData(event.currentTarget);
+    const password = String(form.get("password") || "").trim();
+    try {
+      await api.updateUser(user.id, {
+        username: String(form.get("username") || ""),
+        email: valueOrUndefined(form.get("email")),
+        displayName: valueOrUndefined(form.get("displayName")),
+        password: password || undefined,
+        isAdmin: form.get("isAdmin") === "on"
+      });
+      setEditing(false);
+      onChanged();
+    } catch (err) {
+      setMessage(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove() {
+    await api.deleteUser(user.id);
+    onChanged();
+  }
+  return (
+    <div className="user-row">
+      <div className="user-row-head">
+        <div>
+          <strong>{user.displayName || user.username}</strong>
+          <span>@{user.username}{user.email ? ` · ${user.email}` : ""}</span>
+        </div>
+        <div className="action-row">
+          {user.isAdmin && <span className="muted-pill">Admin</span>}
+          <button className="tiny-button" type="button" onClick={() => setEditing((value) => !value)}>
+            {editing ? "Close" : "Edit"}
+          </button>
+          <ConfirmButton
+            className="tiny-button"
+            title="Delete user"
+            detail={`Delete ${user.username}? Their existing private captures remain private but lose an active owner.`}
+            confirmLabel="Delete"
+            onConfirm={remove}
+          >
+            Delete
+          </ConfirmButton>
+        </div>
+      </div>
+      {editing && (
+        <form className="settings-form inline-user-form" onSubmit={submit}>
+          <div className="form-pair">
+            <label>
+              Username
+              <input name="username" defaultValue={user.username} required />
+            </label>
+            <label>
+              New password
+              <input name="password" type="password" autoComplete="new-password" minLength={8} placeholder="leave blank" />
+            </label>
+          </div>
+          <div className="form-pair">
+            <label>
+              Email
+              <input name="email" type="email" defaultValue={user.email || ""} />
+            </label>
+            <label>
+              Display name
+              <input name="displayName" defaultValue={user.displayName} />
+            </label>
+          </div>
+          <label className="check-line">
+            <input name="isAdmin" type="checkbox" defaultChecked={user.isAdmin} />
+            Admin
+          </label>
+          {message && <div className="form-error">{message}</div>}
+          <button className="primary-button" disabled={busy}>
+            {busy ? <Loader2 className="spin" size={16} /> : <Settings size={16} />}
+            Save user
+          </button>
+        </form>
+      )}
+    </div>
   );
 }
 

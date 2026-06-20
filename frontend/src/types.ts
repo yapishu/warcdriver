@@ -3,10 +3,12 @@ export type User = {
   username: string;
   email?: string;
   displayName: string;
+  isAdmin: boolean;
   createdAt: string;
 };
 
 export type ArchiveScope = "single_page" | "linked_pages" | "same_subdomain" | "prefix" | "explicit_urls";
+export type Visibility = "private" | "public";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 export type ArchiveJob = {
@@ -15,6 +17,7 @@ export type ArchiveJob = {
   scope: ArchiveScope;
   depth: number;
   maxPages: number;
+  visibility: Visibility;
   status: JobStatus;
   statusMessage?: string;
   error?: string;
@@ -70,6 +73,7 @@ export type WarcMetadata = {
   captureId: string;
   startUrl: string;
   title?: string;
+  visibility: Visibility;
   createdAt: string;
 };
 

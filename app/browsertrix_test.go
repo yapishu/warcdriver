@@ -236,26 +236,26 @@ func TestBrowsertrixConfigHonorsHeadlessSetting(t *testing.T) {
 func TestBrowsertrixConfigPathExcludeRegex(t *testing.T) {
 	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
 		JobID:         "path-exclude",
-		StartURL:      "https://eventsinukraine.substack.com/",
+		StartURL:      "https://example.com/",
 		Scope:         "same_subdomain",
 		Depth:         -1,
-		PathExcludeRx: `^/p/[^/]+/comment(?:[/?#]|$)`,
+		PathExcludeRx: `/comment(?:[/?#]|$)`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	exclude, ok := cfg["scopeExcludeRx"].(string)
-	if !ok || !strings.Contains(exclude, `^https?://[^/?#]+/p/[^/]+/comment`) {
+	if !ok || !strings.Contains(exclude, `/comment`) {
 		t.Fatalf("scopeExcludeRx does not include translated path filter: %v", cfg["scopeExcludeRx"])
 	}
 	rx, err := regexp.Compile(exclude)
 	if err != nil {
 		t.Fatalf("scopeExcludeRx should compile: %v", err)
 	}
-	if !rx.MatchString("https://eventsinukraine.substack.com/p/ukraine-saves-dubai/comment/228026416") {
+	if !rx.MatchString("https://example.com/p/post/comment/228026416") {
 		t.Fatalf("scopeExcludeRx should match comment route: %s", exclude)
 	}
-	if rx.MatchString("https://eventsinukraine.substack.com/p/ukraine-saves-dubai") {
+	if rx.MatchString("https://example.com/p/post") {
 		t.Fatalf("scopeExcludeRx should not match article route: %s", exclude)
 	}
 }

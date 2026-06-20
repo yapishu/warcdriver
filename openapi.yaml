@@ -46,6 +46,88 @@ paths:
                 $ref: "#/components/schemas/MeResponse"
         "401":
           $ref: "#/components/responses/Error"
+  /api/users:
+    get:
+      operationId: listUsers
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+    post:
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /api/users/{id}:
+    put:
+      operationId: updateUser
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteUser
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/archive-jobs:
     post:
       operationId: createArchiveJob
@@ -253,6 +335,10 @@ paths:
   /api/warcs/{id}/download:
     get:
       operationId: downloadWarc
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+        - {}
       parameters:
         - $ref: "#/components/parameters/Id"
       responses:
@@ -270,6 +356,10 @@ paths:
   /api/warcs/{id}/metadata:
     get:
       operationId: getWarcMetadata
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+        - {}
       parameters:
         - $ref: "#/components/parameters/Id"
       responses:
@@ -280,6 +370,32 @@ paths:
               schema:
                 $ref: "#/components/schemas/WarcMetadata"
         "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/warcs/{id}/visibility:
+    put:
+      operationId: updateWarcVisibility
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWarcVisibilityRequest"
+      responses:
+        "200":
+          description: Updated WARC capture metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WarcMetadata"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
@@ -428,7 +544,7 @@ components:
           $ref: "#/components/schemas/User"
     User:
       type: object
-      required: [id, username, displayName, createdAt]
+      required: [id, username, displayName, isAdmin, createdAt]
       properties:
         id:
           type: string
@@ -438,12 +554,48 @@ components:
           type: string
         displayName:
           type: string
+        isAdmin:
+          type: boolean
         createdAt:
           type: string
           format: date-time
+    CreateUserRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+        email:
+          type: string
+        displayName:
+          type: string
+        password:
+          type: string
+          minLength: 8
+        isAdmin:
+          type: boolean
+          default: false
+    UpdateUserRequest:
+      type: object
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        password:
+          type: string
+          minLength: 8
+        isAdmin:
+          type: boolean
     ArchiveScope:
       type: string
       enum: [single_page, linked_pages, same_subdomain, prefix, explicit_urls]
+    Visibility:
+      type: string
+      enum: [private, public]
     CreateArchiveJobRequest:
       type: object
       required: [url]
@@ -476,9 +628,13 @@ components:
           format: uri
         pathExcludeRx:
           type: string
-          description: Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery, e.g. ^/p/[^/]+/comment to skip Substack comment pages.
+          description: Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery.
         cookieProfileId:
           type: string
+        visibility:
+          allOf:
+            - $ref: "#/components/schemas/Visibility"
+          default: private
         enrich:
           type: boolean
     JobStatus:
@@ -486,7 +642,7 @@ components:
       enum: [queued, running, succeeded, failed, canceled]
     ArchiveJob:
       type: object
-      required: [id, url, scope, depth, maxPages, status, createdAt]
+      required: [id, url, scope, depth, maxPages, visibility, status, createdAt]
       properties:
         id:
           type: string
@@ -498,6 +654,8 @@ components:
           type: integer
         maxPages:
           type: integer
+        visibility:
+          $ref: "#/components/schemas/Visibility"
         status:
           $ref: "#/components/schemas/JobStatus"
         statusMessage:
@@ -614,7 +772,7 @@ components:
               type: string
     WarcMetadata:
       type: object
-      required: [captureId, startUrl, createdAt]
+      required: [captureId, startUrl, visibility, createdAt]
       properties:
         captureId:
           type: string
@@ -622,9 +780,17 @@ components:
           type: string
         title:
           type: string
+        visibility:
+          $ref: "#/components/schemas/Visibility"
         createdAt:
           type: string
           format: date-time
+    UpdateWarcVisibilityRequest:
+      type: object
+      required: [visibility]
+      properties:
+        visibility:
+          $ref: "#/components/schemas/Visibility"
     Settings:
       type: object
       required: [openRouterModel, enrichmentEnabled, filterLists, captureHeadless, capturePageDelay, capturePageRetries, captureUseSitemap]

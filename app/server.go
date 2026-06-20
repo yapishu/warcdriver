@@ -90,12 +90,38 @@ func (a *App) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		user, err := a.authenticate(r)
+		if err != nil && publicWarcReadPath(r.URL.Path) {
+			id, ok := warcIDFromReadPath(r.URL.Path)
+			if ok {
+				capture, captureErr := a.store.GetCapture(r.Context(), id)
+				if captureErr == nil && capture.Visibility == VisibilityPublic {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+func publicWarcReadPath(path string) bool {
+	if !strings.HasPrefix(path, "/api/warcs/") {
+		return false
+	}
+	return strings.HasSuffix(path, "/download") || strings.HasSuffix(path, "/metadata")
+}
+
+func warcIDFromReadPath(path string) (string, bool) {
+	path = strings.TrimPrefix(path, "/api/warcs/")
+	id, suffix, ok := strings.Cut(path, "/")
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, suffix == "download" || suffix == "metadata"
 }
 
 func (a *App) authenticate(r *http.Request) (*UserRecord, error) {
@@ -196,6 +222,165 @@ func (a *App) GetMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.MeResponse{User: apiUser(user)})
 }
 
+func (a *App) ListUsers(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	users, err := a.store.ListUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]api.User, 0, len(users))
+	for i := range users {
+		out = append(out, apiUser(&users[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+}
+
+func (a *App) CreateUser(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	var req api.CreateUserJSONRequestBody
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	password := strings.TrimSpace(req.Password)
+	if len(password) < 8 {
+		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+	isAdmin := false
+	if req.IsAdmin != nil {
+		isAdmin = *req.IsAdmin
+	}
+	user, err := a.store.CreateUser(r.Context(), UserCreate{
+		Username:     req.Username,
+		Email:        plainString(req.Email),
+		DisplayName:  plainString(req.DisplayName),
+		PasswordHash: hash,
+		IsAdmin:      isAdmin,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, apiUser(user))
+}
+
+func (a *App) UpdateUser(w http.ResponseWriter, r *http.Request, id api.Id) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	var req api.UpdateUserJSONRequestBody
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	update := UserUpdate{
+		Username:    req.Username,
+		Email:       req.Email,
+		DisplayName: req.DisplayName,
+		IsAdmin:     req.IsAdmin,
+	}
+	if req.Password != nil {
+		password := strings.TrimSpace(*req.Password)
+		if len(password) < 8 {
+			writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			return
+		}
+		hash, err := hashPassword(password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to hash password")
+			return
+		}
+		update.PasswordHash = &hash
+	}
+	if req.IsAdmin != nil && !*req.IsAdmin {
+		current, _ := userFromContext(r.Context())
+		if current != nil && current.ID == id {
+			writeError(w, http.StatusBadRequest, "cannot remove admin from the current user")
+			return
+		}
+	}
+	user, err := a.store.UpdateUser(r.Context(), id, update)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, apiUser(user))
+}
+
+func (a *App) DeleteUser(w http.ResponseWriter, r *http.Request, id api.Id) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	current, _ := userFromContext(r.Context())
+	if current != nil && current.ID == id {
+		writeError(w, http.StatusBadRequest, "cannot delete the current user")
+		return
+	}
+	err := a.store.DeleteUser(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	user, ok := userFromContext(r.Context())
+	if !ok || user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	if !user.IsAdmin {
+		writeError(w, http.StatusForbidden, "admin required")
+		return false
+	}
+	return true
+}
+
+func (a *App) canManageJob(w http.ResponseWriter, r *http.Request, id string) bool {
+	user, _ := userFromContext(r.Context())
+	job, err := a.store.GetArchiveJob(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "job not found")
+		return false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if user == nil || (!user.IsAdmin && (!job.UserID.Valid || job.UserID.String != user.ID)) {
+		writeError(w, http.StatusForbidden, "job owner or admin required")
+		return false
+	}
+	return true
+}
+
+func userCanManageCapture(user *UserRecord, capture *CaptureRecord) bool {
+	if user == nil || capture == nil {
+		return false
+	}
+	return user.IsAdmin || (capture.OwnerUserID.Valid && capture.OwnerUserID.String == user.ID)
+}
+
 func (a *App) CreateArchiveJob(w http.ResponseWriter, r *http.Request) {
 	var req api.CreateArchiveJobJSONRequestBody
 	if err := readJSON(r, &req); err != nil {
@@ -223,7 +408,8 @@ func (a *App) CreateArchiveJob(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) ListArchiveJobs(w http.ResponseWriter, r *http.Request, params api.ListArchiveJobsParams) {
 	limit := boundedLimit(params.Limit, 50, 200)
-	jobs, err := a.store.ListArchiveJobs(r.Context(), limit)
+	user, _ := userFromContext(r.Context())
+	jobs, err := a.store.ListArchiveJobsVisible(r.Context(), user, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -236,7 +422,8 @@ func (a *App) ListArchiveJobs(w http.ResponseWriter, r *http.Request, params api
 }
 
 func (a *App) GetArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
-	job, err := a.store.GetArchiveJob(r.Context(), id)
+	user, _ := userFromContext(r.Context())
+	job, err := a.store.GetArchiveJobVisible(r.Context(), id, user)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
@@ -250,7 +437,7 @@ func (a *App) GetArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	items, err := a.store.ListItemsForJob(r.Context(), id)
+	items, err := a.store.ListItemsForJobVisible(r.Context(), id, user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -270,6 +457,9 @@ func (a *App) GetArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
 }
 
 func (a *App) CancelArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
+	if !a.canManageJob(w, r, id) {
+		return
+	}
 	a.cancelActiveJob(id)
 	job, err := a.store.CancelJob(r.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -285,6 +475,9 @@ func (a *App) CancelArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id
 }
 
 func (a *App) DeleteArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
+	if !a.canManageJob(w, r, id) {
+		return
+	}
 	a.cancelActiveJob(id)
 	if err := a.store.DeleteArchiveJob(r.Context(), id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -298,7 +491,8 @@ func (a *App) DeleteArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id
 }
 
 func (a *App) ListSites(w http.ResponseWriter, r *http.Request, params api.ListSitesParams) {
-	sites, err := a.store.ListSites(r.Context(), boundedLimit(params.Limit, 100, 200))
+	user, _ := userFromContext(r.Context())
+	sites, err := a.store.ListSitesVisible(r.Context(), user, boundedLimit(params.Limit, 100, 200))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -311,7 +505,8 @@ func (a *App) ListSites(w http.ResponseWriter, r *http.Request, params api.ListS
 }
 
 func (a *App) GetSite(w http.ResponseWriter, r *http.Request, id api.Id) {
-	site, err := a.store.GetSite(r.Context(), id)
+	user, _ := userFromContext(r.Context())
+	site, err := a.store.GetSiteVisible(r.Context(), id, user)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "site not found")
 		return
@@ -320,7 +515,7 @@ func (a *App) GetSite(w http.ResponseWriter, r *http.Request, id api.Id) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	items, err := a.store.ListItemsForSite(r.Context(), id, 200)
+	items, err := a.store.ListItemsForSiteVisible(r.Context(), id, user, 200)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -333,6 +528,9 @@ func (a *App) GetSite(w http.ResponseWriter, r *http.Request, id api.Id) {
 }
 
 func (a *App) DeleteSite(w http.ResponseWriter, r *http.Request, id api.Id) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
 	err := a.store.DeleteSite(r.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "site not found")
@@ -354,7 +552,8 @@ func (a *App) ListItems(w http.ResponseWriter, r *http.Request, params api.ListI
 	if params.Q != nil {
 		q = *params.Q
 	}
-	items, err := a.store.ListItems(r.Context(), siteID, q, boundedLimit(params.Limit, 100, 200))
+	user, _ := userFromContext(r.Context())
+	items, err := a.store.ListItemsVisible(r.Context(), user, siteID, q, boundedLimit(params.Limit, 100, 200))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -367,7 +566,8 @@ func (a *App) ListItems(w http.ResponseWriter, r *http.Request, params api.ListI
 }
 
 func (a *App) GetItem(w http.ResponseWriter, r *http.Request, id api.Id) {
-	item, err := a.store.GetItem(r.Context(), id)
+	user, _ := userFromContext(r.Context())
+	item, err := a.store.GetItemVisible(r.Context(), id, user)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "item not found")
 		return
@@ -393,7 +593,26 @@ func (a *App) GetItem(w http.ResponseWriter, r *http.Request, id api.Id) {
 }
 
 func (a *App) DeleteItem(w http.ResponseWriter, r *http.Request, id api.Id) {
-	err := a.store.DeleteItem(r.Context(), id)
+	user, _ := userFromContext(r.Context())
+	item, err := a.store.GetItemVisible(r.Context(), id, user)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "item not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	capture, err := a.store.GetCapture(r.Context(), item.CaptureID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !userCanManageCapture(user, capture) {
+		writeError(w, http.StatusForbidden, "capture owner or admin required")
+		return
+	}
+	err = a.store.DeleteItem(r.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "item not found")
 		return
@@ -405,8 +624,23 @@ func (a *App) DeleteItem(w http.ResponseWriter, r *http.Request, id api.Id) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (a *App) captureForRead(r *http.Request, id string) (*CaptureRecord, error) {
+	user, ok := userFromContext(r.Context())
+	if ok && user != nil {
+		return a.store.GetCaptureVisible(r.Context(), id, user)
+	}
+	capture, err := a.store.GetCapture(r.Context(), id)
+	if err != nil {
+		return nil, err
+	}
+	if capture.Visibility != VisibilityPublic {
+		return nil, sql.ErrNoRows
+	}
+	return capture, nil
+}
+
 func (a *App) DownloadWarc(w http.ResponseWriter, r *http.Request, id api.Id) {
-	capture, err := a.store.GetCaptureByWARCID(r.Context(), id)
+	capture, err := a.captureForRead(r, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "capture not found")
 		return
@@ -421,7 +655,7 @@ func (a *App) DownloadWarc(w http.ResponseWriter, r *http.Request, id api.Id) {
 }
 
 func (a *App) GetWarcMetadata(w http.ResponseWriter, r *http.Request, id api.Id) {
-	capture, err := a.store.GetCaptureByWARCID(r.Context(), id)
+	capture, err := a.captureForRead(r, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "capture not found")
 		return
@@ -431,10 +665,49 @@ func (a *App) GetWarcMetadata(w http.ResponseWriter, r *http.Request, id api.Id)
 		return
 	}
 	writeJSON(w, http.StatusOK, api.WarcMetadata{
-		CaptureId: capture.ID,
-		StartUrl:  capture.StartURL,
-		Title:     nullableString(capture.Title),
-		CreatedAt: capture.CreatedAt,
+		CaptureId:  capture.ID,
+		StartUrl:   capture.StartURL,
+		Title:      nullableString(capture.Title),
+		Visibility: api.Visibility(capture.Visibility),
+		CreatedAt:  capture.CreatedAt,
+	})
+}
+
+func (a *App) UpdateWarcVisibility(w http.ResponseWriter, r *http.Request, id api.Id) {
+	var req api.UpdateWarcVisibilityJSONRequestBody
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	user, _ := userFromContext(r.Context())
+	capture, err := a.store.GetCapture(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "capture not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !userCanManageCapture(user, capture) {
+		writeError(w, http.StatusForbidden, "capture owner or admin required")
+		return
+	}
+	capture, err = a.store.UpdateCaptureVisibility(r.Context(), id, string(req.Visibility))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "capture not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, api.WarcMetadata{
+		CaptureId:  capture.ID,
+		StartUrl:   capture.StartURL,
+		Title:      nullableString(capture.Title),
+		Visibility: api.Visibility(capture.Visibility),
+		CreatedAt:  capture.CreatedAt,
 	})
 }
 
@@ -656,6 +929,13 @@ func nullablePlainString(v string) *string {
 	return &v
 }
 
+func plainString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(*v)
+}
+
 func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (ArchiveJobCreate, error) {
 	if strings.TrimSpace(req.Url) == "" {
 		return ArchiveJobCreate{}, fmt.Errorf("url is required")
@@ -728,6 +1008,10 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 	if req.CookieProfileId != nil {
 		cookieProfileID = *req.CookieProfileId
 	}
+	visibility := VisibilityPrivate
+	if req.Visibility != nil {
+		visibility = normalizeVisibility(string(*req.Visibility))
+	}
 	if depth < -1 || depth > 5 {
 		return ArchiveJobCreate{}, fmt.Errorf("depth must be between -1 and 5")
 	}
@@ -743,6 +1027,7 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 		Prefix:          prefix,
 		PathExcludeRx:   pathExcludeRx,
 		CookieProfileID: cookieProfileID,
+		Visibility:      visibility,
 		Enrich:          enrich,
 	}, nil
 }
@@ -823,7 +1108,7 @@ func apiUser(u *UserRecord) api.User {
 	if u == nil {
 		return api.User{}
 	}
-	return api.User{Id: u.ID, Username: u.Username, Email: nullableString(u.Email), DisplayName: u.DisplayName, CreatedAt: u.CreatedAt}
+	return api.User{Id: u.ID, Username: u.Username, Email: nullableString(u.Email), DisplayName: u.DisplayName, IsAdmin: u.IsAdmin, CreatedAt: u.CreatedAt}
 }
 
 func apiArchiveJob(j *ArchiveJobRecord) api.ArchiveJob {
@@ -833,6 +1118,7 @@ func apiArchiveJob(j *ArchiveJobRecord) api.ArchiveJob {
 		Scope:         api.ArchiveScope(j.Scope),
 		Depth:         j.Depth,
 		MaxPages:      j.MaxPages,
+		Visibility:    api.Visibility(j.Visibility),
 		Status:        api.JobStatus(j.Status),
 		StatusMessage: nullableString(j.StatusMessage),
 		Error:         nullableString(j.Error),
@@ -851,6 +1137,7 @@ func apiArchiveJobDetail(j *ArchiveJobRecord) api.ArchiveJobDetail {
 		Scope:         base.Scope,
 		Depth:         base.Depth,
 		MaxPages:      base.MaxPages,
+		Visibility:    base.Visibility,
 		Status:        base.Status,
 		StatusMessage: base.StatusMessage,
 		Error:         base.Error,

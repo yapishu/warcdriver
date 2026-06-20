@@ -9,6 +9,7 @@ import type {
   Settings,
   Site,
   User,
+  Visibility,
   WarcMetadata
 } from "./types";
 
@@ -44,6 +45,7 @@ export type CreateJobPayload = {
   scope: ArchiveScope;
   depth: number;
   maxPages: number;
+  visibility?: Visibility;
   prefix?: string;
   pathExcludeRx?: string;
   cookieProfileId?: string;
@@ -58,11 +60,32 @@ export type CreateCookieProfilePayload = {
   content?: string;
 };
 
+export type CreateUserPayload = {
+  username: string;
+  email?: string;
+  displayName?: string;
+  password: string;
+  isAdmin?: boolean;
+};
+
+export type UpdateUserPayload = {
+  username?: string;
+  email?: string;
+  displayName?: string;
+  password?: string;
+  isAdmin?: boolean;
+};
+
 export const api = {
   login: (username: string, password: string) =>
     request<{ user: User }>("/api/auth/login", { method: "POST", body: { username, password } }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   me: () => request<{ user: User }>("/api/me"),
+  users: () => request<{ users: User[] }>("/api/users"),
+  createUser: (body: CreateUserPayload) => request<User>("/api/users", { method: "POST", body }),
+  updateUser: (id: string, body: UpdateUserPayload) =>
+    request<User>(`/api/users/${id}`, { method: "PUT", body }),
+  deleteUser: (id: string) => request<void>(`/api/users/${id}`, { method: "DELETE" }),
   createJob: (body: CreateJobPayload) =>
     request<ArchiveJob>("/api/archive-jobs", { method: "POST", body }),
   jobs: (limit = 50) => request<{ jobs: ArchiveJob[] }>(`/api/archive-jobs?limit=${limit}`),
@@ -82,6 +105,8 @@ export const api = {
   item: (id: string) => request<ItemDetail>(`/api/items/${id}`),
   deleteItem: (id: string) => request<void>(`/api/items/${id}`, { method: "DELETE" }),
   warcMetadata: (id: string) => request<WarcMetadata>(`/api/warcs/${id}/metadata`),
+  updateWarcVisibility: (id: string, visibility: Visibility) =>
+    request<WarcMetadata>(`/api/warcs/${id}/visibility`, { method: "PUT", body: { visibility } }),
   settings: () => request<Settings>("/api/settings"),
   updateSettings: (body: Partial<Settings> & { openRouterApiKey?: string }) =>
     request<Settings>("/api/settings", { method: "PUT", body }),

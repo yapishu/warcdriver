@@ -169,7 +169,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		_ = a.store.FailJob(context.Background(), job.ID, err)
 		return
 	}
-	capture, err := a.store.CreateCapture(jobCtx, job.ID, site.ID, job.URL, first.Title, result.WARCPath)
+	capture, err := a.store.CreateCapture(jobCtx, job.ID, site.ID, nullString(job.UserID), job.URL, first.Title, result.WARCPath, job.Visibility)
 	if err != nil {
 		jobLog("error", err.Error())
 		_ = a.store.FailJob(context.Background(), job.ID, err)

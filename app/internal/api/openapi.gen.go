@@ -43,6 +43,12 @@ const (
 	Succeeded JobStatus = "succeeded"
 )
 
+// Defines values for Visibility.
+const (
+	Private Visibility = "private"
+	Public  Visibility = "public"
+)
+
 // ArchiveJob defines model for ArchiveJob.
 type ArchiveJob struct {
 	CaptureId     *string      `json:"captureId,omitempty"`
@@ -57,6 +63,7 @@ type ArchiveJob struct {
 	Status        JobStatus    `json:"status"`
 	StatusMessage *string      `json:"statusMessage,omitempty"`
 	Url           string       `json:"url"`
+	Visibility    Visibility   `json:"visibility"`
 }
 
 // ArchiveJobDetail defines model for ArchiveJobDetail.
@@ -75,6 +82,7 @@ type ArchiveJobDetail struct {
 	Status        JobStatus    `json:"status"`
 	StatusMessage *string      `json:"statusMessage,omitempty"`
 	Url           string       `json:"url"`
+	Visibility    Visibility   `json:"visibility"`
 }
 
 // ArchiveScope defines model for ArchiveScope.
@@ -101,12 +109,13 @@ type CreateArchiveJobRequest struct {
 	// MaxPages Maximum number of pages to capture. Use 0 for unlimited. If omitted, same_subdomain and prefix jobs default to unlimited, while other scopes default to 100.
 	MaxPages *int `json:"maxPages,omitempty"`
 
-	// PathExcludeRx Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery, e.g. ^/p/[^/]+/comment to skip Substack comment pages.
+	// PathExcludeRx Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery.
 	PathExcludeRx *string       `json:"pathExcludeRx,omitempty"`
 	Prefix        *string       `json:"prefix,omitempty"`
 	Scope         *ArchiveScope `json:"scope,omitempty"`
 	Url           string        `json:"url"`
 	Urls          *[]string     `json:"urls,omitempty"`
+	Visibility    *Visibility   `json:"visibility,omitempty"`
 }
 
 // CreateCookieProfileRequest defines model for CreateCookieProfileRequest.
@@ -116,6 +125,15 @@ type CreateCookieProfileRequest struct {
 	Host         *string                 `json:"host,omitempty"`
 	Name         string                  `json:"name"`
 	SourceType   CookieProfileSourceType `json:"sourceType"`
+}
+
+// CreateUserRequest defines model for CreateUserRequest.
+type CreateUserRequest struct {
+	DisplayName *string `json:"displayName,omitempty"`
+	Email       *string `json:"email,omitempty"`
+	IsAdmin     *bool   `json:"isAdmin,omitempty"`
+	Password    string  `json:"password"`
+	Username    string  `json:"username"`
 }
 
 // ErrorResponse defines model for ErrorResponse.
@@ -223,21 +241,40 @@ type UpdateSettingsRequest struct {
 	UserAgent          *string   `json:"userAgent,omitempty"`
 }
 
+// UpdateUserRequest defines model for UpdateUserRequest.
+type UpdateUserRequest struct {
+	DisplayName *string `json:"displayName,omitempty"`
+	Email       *string `json:"email,omitempty"`
+	IsAdmin     *bool   `json:"isAdmin,omitempty"`
+	Password    *string `json:"password,omitempty"`
+	Username    *string `json:"username,omitempty"`
+}
+
+// UpdateWarcVisibilityRequest defines model for UpdateWarcVisibilityRequest.
+type UpdateWarcVisibilityRequest struct {
+	Visibility Visibility `json:"visibility"`
+}
+
 // User defines model for User.
 type User struct {
 	CreatedAt   time.Time `json:"createdAt"`
 	DisplayName string    `json:"displayName"`
 	Email       *string   `json:"email,omitempty"`
 	Id          string    `json:"id"`
+	IsAdmin     bool      `json:"isAdmin"`
 	Username    string    `json:"username"`
 }
 
+// Visibility defines model for Visibility.
+type Visibility string
+
 // WarcMetadata defines model for WarcMetadata.
 type WarcMetadata struct {
-	CaptureId string    `json:"captureId"`
-	CreatedAt time.Time `json:"createdAt"`
-	StartUrl  string    `json:"startUrl"`
-	Title     *string   `json:"title,omitempty"`
+	CaptureId  string     `json:"captureId"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	StartUrl   string     `json:"startUrl"`
+	Title      *string    `json:"title,omitempty"`
+	Visibility Visibility `json:"visibility"`
 }
 
 // Id defines model for Id.
@@ -274,6 +311,15 @@ type CreateCookieProfileJSONRequestBody = CreateCookieProfileRequest
 
 // UpdateSettingsJSONRequestBody defines body for UpdateSettings for application/json ContentType.
 type UpdateSettingsJSONRequestBody = UpdateSettingsRequest
+
+// CreateUserJSONRequestBody defines body for CreateUser for application/json ContentType.
+type CreateUserJSONRequestBody = CreateUserRequest
+
+// UpdateUserJSONRequestBody defines body for UpdateUser for application/json ContentType.
+type UpdateUserJSONRequestBody = UpdateUserRequest
+
+// UpdateWarcVisibilityJSONRequestBody defines body for UpdateWarcVisibility for application/json ContentType.
+type UpdateWarcVisibilityJSONRequestBody = UpdateWarcVisibilityRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -338,11 +384,26 @@ type ServerInterface interface {
 	// (GET /api/sites/{id})
 	GetSite(w http.ResponseWriter, r *http.Request, id Id)
 
+	// (GET /api/users)
+	ListUsers(w http.ResponseWriter, r *http.Request)
+
+	// (POST /api/users)
+	CreateUser(w http.ResponseWriter, r *http.Request)
+
+	// (DELETE /api/users/{id})
+	DeleteUser(w http.ResponseWriter, r *http.Request, id Id)
+
+	// (PUT /api/users/{id})
+	UpdateUser(w http.ResponseWriter, r *http.Request, id Id)
+
 	// (GET /api/warcs/{id}/download)
 	DownloadWarc(w http.ResponseWriter, r *http.Request, id Id)
 
 	// (GET /api/warcs/{id}/metadata)
 	GetWarcMetadata(w http.ResponseWriter, r *http.Request, id Id)
+
+	// (PUT /api/warcs/{id}/visibility)
+	UpdateWarcVisibility(w http.ResponseWriter, r *http.Request, id Id)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
@@ -449,6 +510,26 @@ func (_ Unimplemented) GetSite(w http.ResponseWriter, r *http.Request, id Id) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// (GET /api/users)
+func (_ Unimplemented) ListUsers(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /api/users)
+func (_ Unimplemented) CreateUser(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (DELETE /api/users/{id})
+func (_ Unimplemented) DeleteUser(w http.ResponseWriter, r *http.Request, id Id) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PUT /api/users/{id})
+func (_ Unimplemented) UpdateUser(w http.ResponseWriter, r *http.Request, id Id) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // (GET /api/warcs/{id}/download)
 func (_ Unimplemented) DownloadWarc(w http.ResponseWriter, r *http.Request, id Id) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -456,6 +537,11 @@ func (_ Unimplemented) DownloadWarc(w http.ResponseWriter, r *http.Request, id I
 
 // (GET /api/warcs/{id}/metadata)
 func (_ Unimplemented) GetWarcMetadata(w http.ResponseWriter, r *http.Request, id Id) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (PUT /api/warcs/{id}/visibility)
+func (_ Unimplemented) UpdateWarcVisibility(w http.ResponseWriter, r *http.Request, id Id) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1043,6 +1129,116 @@ func (siw *ServerInterfaceWrapper) GetSite(w http.ResponseWriter, r *http.Reques
 	handler.ServeHTTP(w, r)
 }
 
+// ListUsers operation middleware
+func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListUsers(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateUser operation middleware
+func (siw *ServerInterfaceWrapper) CreateUser(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateUser(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteUser operation middleware
+func (siw *ServerInterfaceWrapper) DeleteUser(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteUser(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateUser operation middleware
+func (siw *ServerInterfaceWrapper) UpdateUser(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateUser(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DownloadWarc operation middleware
 func (siw *ServerInterfaceWrapper) DownloadWarc(w http.ResponseWriter, r *http.Request) {
 
@@ -1100,6 +1296,39 @@ func (siw *ServerInterfaceWrapper) GetWarcMetadata(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetWarcMetadata(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateWarcVisibility operation middleware
+func (siw *ServerInterfaceWrapper) UpdateWarcVisibility(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateWarcVisibility(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1283,10 +1512,25 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/api/sites/{id}", wrapper.GetSite)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/users", wrapper.ListUsers)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/users", wrapper.CreateUser)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/users/{id}", wrapper.DeleteUser)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/users/{id}", wrapper.UpdateUser)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/warcs/{id}/download", wrapper.DownloadWarc)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/warcs/{id}/metadata", wrapper.GetWarcMetadata)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/warcs/{id}/visibility", wrapper.UpdateWarcVisibility)
 	})
 
 	return r
