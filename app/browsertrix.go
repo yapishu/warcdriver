@@ -17,7 +17,12 @@ import (
 	"time"
 )
 
-const browsertrixClaimTimeout = 90 * time.Second
+const (
+	browsertrixClaimTimeout       = 90 * time.Second
+	browsertrixFontBehaviorPath   = "/app/warcdriver-behaviors"
+	browsertrixFontBehaviorMaxMS  = 8_000
+	browsertrixFontBehaviorScroll = 30
+)
 
 type BrowsertrixCaptureOptions struct {
 	JobID         string
@@ -201,6 +206,7 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 		"failOnFailedSeed":    true,
 		"failOnInvalidStatus": false,
 		"behaviors":           []string{"autoplay", "autofetch", "autoscroll", "siteSpecific"},
+		"customBehaviors":     []string{browsertrixFontBehaviorPath},
 		"blockAds":            opts.BlockAds,
 		"saveState":           "partial",
 		"logging":             []string{"stats"},
@@ -234,21 +240,24 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 
 func browsertrixRequestSummary(opts BrowsertrixCaptureOptions) map[string]any {
 	return map[string]any{
-		"jobId":         opts.JobID,
-		"startUrl":      opts.StartURL,
-		"explicitUrls":  opts.ExplicitURLs,
-		"scope":         opts.Scope,
-		"depth":         opts.Depth,
-		"maxPages":      opts.MaxPages,
-		"prefix":        opts.Prefix,
-		"pathExcludeRx": opts.PathExcludeRx,
-		"userAgentSet":  strings.TrimSpace(opts.UserAgent) != "",
-		"cookieCount":   len(opts.Cookies),
-		"blockAds":      opts.BlockAds,
-		"headless":      opts.Headless,
-		"pageDelay":     browsertrixPageExtraDelay(opts),
-		"pageRetries":   browsertrixMaxPageRetries(opts),
-		"useSitemap":    opts.UseSitemap,
+		"jobId":                 opts.JobID,
+		"startUrl":              opts.StartURL,
+		"explicitUrls":          opts.ExplicitURLs,
+		"scope":                 opts.Scope,
+		"depth":                 opts.Depth,
+		"maxPages":              opts.MaxPages,
+		"prefix":                opts.Prefix,
+		"pathExcludeRx":         opts.PathExcludeRx,
+		"userAgentSet":          strings.TrimSpace(opts.UserAgent) != "",
+		"cookieCount":           len(opts.Cookies),
+		"blockAds":              opts.BlockAds,
+		"headless":              opts.Headless,
+		"pageDelay":             browsertrixPageExtraDelay(opts),
+		"pageRetries":           browsertrixMaxPageRetries(opts),
+		"useSitemap":            opts.UseSitemap,
+		"fontLoader":            true,
+		"fontLoaderMaxMS":       browsertrixFontBehaviorMaxMS,
+		"fontLoaderScrollSteps": browsertrixFontBehaviorScroll,
 	}
 }
 

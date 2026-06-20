@@ -208,6 +208,10 @@ func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
 	if exclude, ok := cfg["scopeExcludeRx"]; ok {
 		t.Fatalf("scopeExcludeRx should be omitted without a path filter so subresources remain recordable: %v", exclude)
 	}
+	customBehaviors, ok := cfg["customBehaviors"].([]string)
+	if !ok || len(customBehaviors) != 1 || customBehaviors[0] != browsertrixFontBehaviorPath {
+		t.Fatalf("customBehaviors = %v, want bundled font loader", cfg["customBehaviors"])
+	}
 }
 
 func TestBrowsertrixConfigHonorsHeadlessSetting(t *testing.T) {
