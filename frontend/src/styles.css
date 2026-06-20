@@ -32,6 +32,12 @@ html,
 body,
 #root {
   min-height: 100%;
+  width: 100%;
+}
+
+html,
+body {
+  overflow-x: hidden;
 }
 
 body {
@@ -92,7 +98,9 @@ label {
 .app-shell {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
+  width: 100%;
   min-height: 100vh;
+  min-width: 0;
 }
 
 .sidebar {
@@ -237,6 +245,7 @@ button:disabled {
   position: sticky;
   top: 0;
   z-index: 3;
+  max-width: 100%;
   padding: 14px 20px;
   border-bottom: 1px solid var(--hairline);
   background: rgba(247, 247, 243, 0.88);
@@ -250,9 +259,10 @@ button:disabled {
 
 .capture-main-row {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: 8px;
   align-items: end;
+  min-width: 0;
 }
 
 .capture-options-row {
@@ -260,6 +270,11 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
   align-items: end;
+  min-width: 0;
+}
+
+.capture-options-row > * {
+  min-width: 0;
 }
 
 .url-field {
@@ -1056,7 +1071,7 @@ button:disabled {
 }
 
 .warc-viewer-page {
-  width: 100vw;
+  width: 100%;
   height: 100vh;
   overflow: hidden;
   display: grid;
@@ -1354,6 +1369,8 @@ button:disabled {
   .sidebar {
     position: static;
     height: auto;
+    max-width: 100%;
+    min-width: 0;
     flex-direction: row;
     align-items: center;
     overflow-x: auto;
@@ -1363,6 +1380,7 @@ button:disabled {
 
   .side-nav {
     display: flex;
+    min-width: 0;
   }
 
   .sidebar-card,
@@ -1380,6 +1398,16 @@ button:disabled {
 
   .search-box {
     min-width: 100%;
+  }
+}
+
+@media (max-width: 700px) {
+  .capture-main-row {
+    grid-template-columns: 1fr;
+  }
+
+  .capture-button {
+    width: 100%;
   }
 }
 

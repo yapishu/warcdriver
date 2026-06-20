@@ -43,6 +43,8 @@ Capture scopes:
 
 Set `maxPages` to `0` to remove the page-count cap. This is intended for whole-publication crawls such as a single Substack subdomain; use the job cancel button if a run gets too broad. If `maxPages` is omitted, `same_subdomain` and `prefix` jobs default to unlimited, while other scopes default to 100 pages.
 
+Archive jobs also accept `pathExcludeRx`, a regular expression matched against URL paths before Browsertrix queues pages. The capture form's "Skip comments" checkbox sends `^/p/[^/]+/comment(?:[/?#]|$)`, which drops Substack article comment routes such as `/p/post/comment/123` while keeping the article page itself.
+
 ## Auth
 
 - Browser auth uses SQLite users plus HTTP-only session cookies.

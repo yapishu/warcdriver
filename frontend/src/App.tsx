@@ -77,6 +77,7 @@ const routeLinks = [
 const replayDarkModeKey = "warcdriver.replayDarkMode";
 const replayChromeHiddenKey = "warcdriver.replayChromeHidden";
 const cookieProfilesChangedEvent = "warcdriver:cookie-profiles-changed";
+const commentPathExcludeRx = "^/p/[^/]+/comment(?:[/?#]|$)";
 
 const replayFrameDarkCSS = `
   :root {
@@ -569,6 +570,7 @@ function CaptureDock() {
     const prefix = String(form.get("prefix") || "").trim();
     const cookieProfileId = String(form.get("cookieProfileId") || "").trim();
     if (prefix) payload.prefix = prefix;
+    if (form.get("skipComments") === "on") payload.pathExcludeRx = commentPathExcludeRx;
     if (cookieProfileId) payload.cookieProfileId = cookieProfileId;
     try {
       const job = await api.createJob(payload);
@@ -673,6 +675,10 @@ function CaptureDock() {
           <label className="prefix-field">
             Prefix
             <input name="prefix" type="url" placeholder="optional" />
+          </label>
+          <label className="check-field">
+            <input name="skipComments" type="checkbox" defaultChecked />
+            Skip comments
           </label>
           <label className="check-field">
             <input name="enrich" type="checkbox" defaultChecked />

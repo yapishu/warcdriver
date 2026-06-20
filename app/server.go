@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +51,12 @@ func (a *App) Routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	root.Get("/api/warcs/sw.js", serveReplayWorker)
+	root.Get("/app-sw.js", serveAppWorker)
+	root.Head("/app-sw.js", serveAppWorker)
+	root.Get("/manifest.webmanifest", serveManifest)
+	root.Head("/manifest.webmanifest", serveManifest)
 	root.Handle("/assets/*", http.FileServer(http.FS(webAssets)))
+	root.Handle("/icons/*", http.FileServer(http.FS(webAssets)))
 	root.Handle("/replay/*", http.FileServer(http.FS(webAssets)))
 	root.Get("/", serveIndex)
 	root.Head("/", serveIndex)
@@ -711,6 +717,13 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 	if req.Prefix != nil {
 		prefix = *req.Prefix
 	}
+	pathExcludeRx := ""
+	if req.PathExcludeRx != nil {
+		pathExcludeRx = strings.TrimSpace(*req.PathExcludeRx)
+		if _, err := regexp.Compile(pathExcludeRx); err != nil {
+			return ArchiveJobCreate{}, fmt.Errorf("invalid pathExcludeRx: %w", err)
+		}
+	}
 	cookieProfileID := ""
 	if req.CookieProfileId != nil {
 		cookieProfileID = *req.CookieProfileId
@@ -728,6 +741,7 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 		Depth:           depth,
 		MaxPages:        maxPages,
 		Prefix:          prefix,
+		PathExcludeRx:   pathExcludeRx,
 		CookieProfileID: cookieProfileID,
 		Enrich:          enrich,
 	}, nil

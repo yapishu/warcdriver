@@ -116,21 +116,22 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		_ = a.store.UpdateJobMessage(context.Background(), job.ID, message)
 	}
 	result, err := a.captureArchiveWithBrowsertrix(jobCtx, BrowsertrixCaptureOptions{
-		JobID:        job.ID,
-		StartURL:     job.URL,
-		ExplicitURLs: explicit,
-		Scope:        job.Scope,
-		Depth:        job.Depth,
-		MaxPages:     job.MaxPages,
-		Prefix:       nullString(job.Prefix),
-		UserAgent:    userAgent,
-		Cookies:      browserCookies,
-		BlockAds:     a.filter != nil,
-		Headless:     captureHeadless,
-		PageDelay:    pageDelay,
-		PageRetries:  pageRetries,
-		UseSitemap:   useSitemap,
-		OnLog:        onCaptureLog,
+		JobID:         job.ID,
+		StartURL:      job.URL,
+		ExplicitURLs:  explicit,
+		Scope:         job.Scope,
+		Depth:         job.Depth,
+		MaxPages:      job.MaxPages,
+		Prefix:        nullString(job.Prefix),
+		PathExcludeRx: nullString(job.PathExcludeRx),
+		UserAgent:     userAgent,
+		Cookies:       browserCookies,
+		BlockAds:      a.filter != nil,
+		Headless:      captureHeadless,
+		PageDelay:     pageDelay,
+		PageRetries:   pageRetries,
+		UseSitemap:    useSitemap,
+		OnLog:         onCaptureLog,
 	})
 	if err != nil {
 		if jobCtx.Err() != nil {

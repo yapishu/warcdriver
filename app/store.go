@@ -53,6 +53,7 @@ type ArchiveJobRecord struct {
 	Depth           int
 	MaxPages        int
 	Prefix          sql.NullString
+	PathExcludeRx   sql.NullString
 	CookieProfileID sql.NullString
 	Enrich          bool
 	Status          string
@@ -187,6 +188,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			depth INTEGER NOT NULL,
 			max_pages INTEGER NOT NULL,
 			prefix TEXT,
+			path_exclude_rx TEXT,
 			cookie_profile_id TEXT REFERENCES cookie_profiles(id) ON DELETE SET NULL,
 			use_browser_profile INTEGER NOT NULL DEFAULT 0,
 			enrich INTEGER NOT NULL DEFAULT 1,
@@ -251,6 +253,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureItemsSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureArchiveJobsSchema(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureReplayabilityBackfill(ctx); err != nil {
@@ -358,6 +363,18 @@ func (s *Store) ensureItemsSchema(ctx context.Context) error {
 		return nil
 	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1`)
+	return err
+}
+
+func (s *Store) ensureArchiveJobsSchema(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "archive_jobs")
+	if err != nil {
+		return err
+	}
+	if _, ok := cols["path_exclude_rx"]; ok {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE archive_jobs ADD COLUMN path_exclude_rx TEXT`)
 	return err
 }
 
@@ -761,15 +778,18 @@ func (s *Store) CreateArchiveJob(ctx context.Context, userID string, req Archive
 	if req.Prefix != "" {
 		rec.Prefix = sql.NullString{String: req.Prefix, Valid: true}
 	}
+	if req.PathExcludeRx != "" {
+		rec.PathExcludeRx = sql.NullString{String: req.PathExcludeRx, Valid: true}
+	}
 	if req.CookieProfileID != "" {
 		rec.CookieProfileID = sql.NullString{String: req.CookieProfileID, Valid: true}
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO archive_jobs(
-			id, user_id, url, urls_json, scope, depth, max_pages, prefix, cookie_profile_id,
+			id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
 			use_browser_profile, enrich, status, created_at
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.UserID, rec.URL, rec.URLsJSON, rec.Scope, rec.Depth, rec.MaxPages,
-		rec.Prefix, rec.CookieProfileID, 0, boolInt(rec.Enrich),
+		rec.Prefix, rec.PathExcludeRx, rec.CookieProfileID, 0, boolInt(rec.Enrich),
 		rec.Status, formatTime(now))
 	return rec, err
 }
@@ -781,6 +801,7 @@ type ArchiveJobCreate struct {
 	Depth           int
 	MaxPages        int
 	Prefix          string
+	PathExcludeRx   string
 	CookieProfileID string
 	Enrich          bool
 }
@@ -792,7 +813,7 @@ func (s *Store) ClaimNextArchiveJob(ctx context.Context) (*ArchiveJobRecord, err
 	}
 	defer tx.Rollback()
 
-	row := tx.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, cookie_profile_id,
+	row := tx.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
 			use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
 		FROM archive_jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1`, StatusQueued)
 	rec, err := scanArchiveJob(row)
@@ -824,14 +845,14 @@ func (s *Store) RequeueRunningJobs(ctx context.Context) error {
 }
 
 func (s *Store) GetArchiveJob(ctx context.Context, id string) (*ArchiveJobRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, cookie_profile_id,
+	row := s.db.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
 			use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
 		FROM archive_jobs WHERE id = ?`, id)
 	return scanArchiveJob(row)
 }
 
 func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, cookie_profile_id,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
 			use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
 		FROM archive_jobs ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
@@ -855,7 +876,7 @@ func scanArchiveJob(row interface{ Scan(dest ...any) error }) (*ArchiveJobRecord
 	var started, finished sql.NullString
 	var ignoredUseProfile, enrich int
 	err := row.Scan(&rec.ID, &rec.UserID, &rec.URL, &rec.URLsJSON, &rec.Scope, &rec.Depth, &rec.MaxPages,
-		&rec.Prefix, &rec.CookieProfileID, &ignoredUseProfile, &enrich, &rec.Status, &rec.StatusMessage,
+		&rec.Prefix, &rec.PathExcludeRx, &rec.CookieProfileID, &ignoredUseProfile, &enrich, &rec.Status, &rec.StatusMessage,
 		&rec.Error, &rec.CaptureID, &created, &started, &finished)
 	if err != nil {
 		return nil, err

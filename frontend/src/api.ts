@@ -45,6 +45,7 @@ export type CreateJobPayload = {
   depth: number;
   maxPages: number;
   prefix?: string;
+  pathExcludeRx?: string;
   cookieProfileId?: string;
   enrich?: boolean;
 };

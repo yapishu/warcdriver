@@ -99,11 +99,14 @@ type CreateArchiveJobRequest struct {
 	Enrich          *bool   `json:"enrich,omitempty"`
 
 	// MaxPages Maximum number of pages to capture. Use 0 for unlimited. If omitted, same_subdomain and prefix jobs default to unlimited, while other scopes default to 100.
-	MaxPages *int          `json:"maxPages,omitempty"`
-	Prefix   *string       `json:"prefix,omitempty"`
-	Scope    *ArchiveScope `json:"scope,omitempty"`
-	Url      string        `json:"url"`
-	Urls     *[]string     `json:"urls,omitempty"`
+	MaxPages *int `json:"maxPages,omitempty"`
+
+	// PathExcludeRx Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery, e.g. ^/p/[^/]+/comment to skip Substack comment pages.
+	PathExcludeRx *string       `json:"pathExcludeRx,omitempty"`
+	Prefix        *string       `json:"prefix,omitempty"`
+	Scope         *ArchiveScope `json:"scope,omitempty"`
+	Url           string        `json:"url"`
+	Urls          *[]string     `json:"urls,omitempty"`
 }
 
 // CreateCookieProfileRequest defines model for CreateCookieProfileRequest.

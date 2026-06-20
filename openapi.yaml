@@ -474,6 +474,9 @@ components:
         prefix:
           type: string
           format: uri
+        pathExcludeRx:
+          type: string
+          description: Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery, e.g. ^/p/[^/]+/comment to skip Substack comment pages.
         cookieProfileId:
           type: string
         enrich:

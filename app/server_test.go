@@ -66,3 +66,23 @@ func TestNormalizeArchiveJobAllowsUnlimitedMaxPages(t *testing.T) {
 		t.Fatalf("maxPages = %d, want 0 for unlimited", got.MaxPages)
 	}
 }
+
+func TestNormalizeArchiveJobAcceptsPathExcludeRegex(t *testing.T) {
+	pathExcludeRx := `^/p/[^/]+/comment(?:[/?#]|$)`
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", PathExcludeRx: &pathExcludeRx}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PathExcludeRx != pathExcludeRx {
+		t.Fatalf("pathExcludeRx = %q, want %q", got.PathExcludeRx, pathExcludeRx)
+	}
+}
+
+func TestNormalizeArchiveJobRejectsBadPathExcludeRegex(t *testing.T) {
+	pathExcludeRx := `[`
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://example.com/", PathExcludeRx: &pathExcludeRx}
+	if _, err := normalizeArchiveJobRequest(req); err == nil {
+		t.Fatal("expected invalid pathExcludeRx to fail")
+	}
+}

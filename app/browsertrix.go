@@ -20,22 +20,23 @@ import (
 const browsertrixClaimTimeout = 90 * time.Second
 
 type BrowsertrixCaptureOptions struct {
-	JobID        string
-	StartURL     string
-	ExplicitURLs []string
-	Scope        string
-	Depth        int
-	MaxPages     int
-	Prefix       string
-	UserAgent    string
-	ProfilePath  string
-	Cookies      []browserCookieData
-	BlockAds     bool
-	Headless     bool
-	PageDelay    int
-	PageRetries  int
-	UseSitemap   bool
-	OnLog        func(level, message string)
+	JobID         string
+	StartURL      string
+	ExplicitURLs  []string
+	Scope         string
+	Depth         int
+	MaxPages      int
+	Prefix        string
+	PathExcludeRx string
+	UserAgent     string
+	ProfilePath   string
+	Cookies       []browserCookieData
+	BlockAds      bool
+	Headless      bool
+	PageDelay     int
+	PageRetries   int
+	UseSitemap    bool
+	OnLog         func(level, message string)
 }
 
 type browsertrixDone struct {
@@ -219,7 +220,7 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 	if include != "" {
 		config["scopeIncludeRx"] = include
 	}
-	if exclude := browsertrixPageExcludeRx(); exclude != "" {
+	if exclude := browsertrixScopeExcludeRx(opts); exclude != "" {
 		config["scopeExcludeRx"] = exclude
 	}
 	if strings.TrimSpace(opts.UserAgent) != "" {
@@ -233,20 +234,21 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 
 func browsertrixRequestSummary(opts BrowsertrixCaptureOptions) map[string]any {
 	return map[string]any{
-		"jobId":        opts.JobID,
-		"startUrl":     opts.StartURL,
-		"explicitUrls": opts.ExplicitURLs,
-		"scope":        opts.Scope,
-		"depth":        opts.Depth,
-		"maxPages":     opts.MaxPages,
-		"prefix":       opts.Prefix,
-		"userAgentSet": strings.TrimSpace(opts.UserAgent) != "",
-		"cookieCount":  len(opts.Cookies),
-		"blockAds":     opts.BlockAds,
-		"headless":     opts.Headless,
-		"pageDelay":    browsertrixPageExtraDelay(opts),
-		"pageRetries":  browsertrixMaxPageRetries(opts),
-		"useSitemap":   opts.UseSitemap,
+		"jobId":         opts.JobID,
+		"startUrl":      opts.StartURL,
+		"explicitUrls":  opts.ExplicitURLs,
+		"scope":         opts.Scope,
+		"depth":         opts.Depth,
+		"maxPages":      opts.MaxPages,
+		"prefix":        opts.Prefix,
+		"pathExcludeRx": opts.PathExcludeRx,
+		"userAgentSet":  strings.TrimSpace(opts.UserAgent) != "",
+		"cookieCount":   len(opts.Cookies),
+		"blockAds":      opts.BlockAds,
+		"headless":      opts.Headless,
+		"pageDelay":     browsertrixPageExtraDelay(opts),
+		"pageRetries":   browsertrixMaxPageRetries(opts),
+		"useSitemap":    opts.UseSitemap,
 	}
 }
 
@@ -297,6 +299,25 @@ func browsertrixScope(opts BrowsertrixCaptureOptions) (scopeType, include string
 
 func browsertrixPageExcludeRx() string {
 	return `\.(?:avif|bmp|css|eot|gif|gz|ico|jpe?g|js|json|m4v|map|mov|mp3|mp4|otf|pdf|png|rss|svg|tar|ttf|webm|webp|woff2?|xml|zip)(?:[?#].*)?$`
+}
+
+func browsertrixScopeExcludeRx(opts BrowsertrixCaptureOptions) string {
+	parts := []string{browsertrixPageExcludeRx()}
+	if pathExclude := browsertrixPathExcludeRx(opts.PathExcludeRx); pathExclude != "" {
+		parts = append(parts, pathExclude)
+	}
+	return strings.Join(parts, "|")
+}
+
+func browsertrixPathExcludeRx(pathRx string) string {
+	pathRx = strings.TrimSpace(pathRx)
+	if pathRx == "" {
+		return ""
+	}
+	if strings.HasPrefix(pathRx, "^") {
+		return `^https?://[^/?#]+` + strings.TrimPrefix(pathRx, "^")
+	}
+	return `^https?://[^/?#]+[^?#]*` + pathRx
 }
 
 func browsertrixLinkSelectors() []string {
