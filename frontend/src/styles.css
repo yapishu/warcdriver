@@ -47,6 +47,10 @@ body {
   color: var(--ink);
 }
 
+#bit-notification-bar {
+  pointer-events: none !important;
+}
+
 #root {
   position: relative;
   isolation: isolate;
