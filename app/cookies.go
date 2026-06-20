@@ -49,10 +49,6 @@ func browserCookiesForProfile(profile *CookieProfileRecord, targetURL string) ([
 	if profile == nil || !profile.Secret.Valid {
 		return nil, nil
 	}
-	host := hostFromURL(targetURL)
-	if profile.Host.Valid && profile.Host.String != "" && !domainMatches(host, profile.Host.String) {
-		return nil, fmt.Errorf("cookie profile host %q does not match target host %q", profile.Host.String, host)
-	}
 
 	switch profile.SourceType {
 	case "raw_header":
@@ -87,20 +83,24 @@ func browserCookiesFromRawHeader(header, targetURL string) []browserCookieData {
 	return out
 }
 
-func browserCookiesFromNetscape(content, targetURL string) []browserCookieData {
-	host := hostFromURL(targetURL)
+func browserCookiesFromNetscape(content, _ string) []browserCookieData {
 	var out []browserCookieData
 	for _, c := range parseNetscapeCookies(content) {
-		if c.Name == "" || !cookieDomainRelevant(host, c.Domain, false) || cookieExpired(c.Expires) {
+		domain := strings.TrimSpace(c.Domain)
+		if c.Name == "" || domain == "" || cookieExpired(c.Expires) {
 			continue
 		}
 		cookie := browserCookieData{
 			Name:     c.Name,
 			Value:    c.Value,
-			Domain:   c.Domain,
 			Path:     firstNonEmpty(c.Path, "/"),
 			Secure:   c.Secure,
 			HTTPOnly: c.HTTPOnly,
+		}
+		if c.IncludeSubdomains {
+			cookie.Domain = domain
+		} else {
+			cookie.URL = cookieURLForDomain(cookieScheme(cookie.Secure, ""), strings.TrimPrefix(domain, "."), cookie.Path)
 		}
 		if c.Expires != nil {
 			expires := float64(c.Expires.Unix())
@@ -111,12 +111,11 @@ func browserCookiesFromNetscape(content, targetURL string) []browserCookieData {
 	return out
 }
 
-func browserCookiesFromJSON(content, targetURL string) ([]browserCookieData, error) {
+func browserCookiesFromJSON(content, _ string) ([]browserCookieData, error) {
 	cookies, err := parseJSONCookies(content)
 	if err != nil {
 		return nil, err
 	}
-	host := hostFromURL(targetURL)
 	var out []browserCookieData
 	for _, c := range cookies {
 		domain := strings.TrimSpace(firstNonEmpty(c.Domain, c.Host))
@@ -127,7 +126,7 @@ func browserCookiesFromJSON(content, targetURL string) ([]browserCookieData, err
 			domain = urlHost
 			hostOnly = true
 		}
-		if c.Name == "" || domain == "" || !cookieDomainRelevant(host, domain, hostOnly) {
+		if c.Name == "" || domain == "" {
 			continue
 		}
 		expiresAt := cookieExpiry(c)
@@ -159,18 +158,6 @@ func browserCookiesFromJSON(content, targetURL string) ([]browserCookieData, err
 		out = append(out, cookie)
 	}
 	return out, nil
-}
-
-func cookieDomainRelevant(targetHost, cookieDomain string, hostOnly bool) bool {
-	targetHost = strings.ToLower(strings.TrimSpace(targetHost))
-	domain := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(cookieDomain)), ".")
-	if targetHost == "" || domain == "" {
-		return false
-	}
-	if hostOnly {
-		return targetHost == domain || strings.HasSuffix(targetHost, "."+domain) || strings.HasSuffix(domain, "."+targetHost)
-	}
-	return domainMatches(targetHost, domain) || domainMatches(domain, targetHost)
 }
 
 func cookieExpired(expires *time.Time) bool {

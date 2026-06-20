@@ -22,7 +22,7 @@ The capture form creates Browsertrix jobs. Useful fields:
 - `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`.
 - `Depth`: link traversal depth. Broad scopes use `All`.
 - `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
-- `Path exclude regex`: a regular expression matched against URL paths before pages are queued, for example `^/(login|cart)(?:/|$)`.
+- `Path exclude regex`: a regular expression matched against URL paths before pages are queued, for example `^/(login|cart)(?:/|$)` or `^/p/[^/]+/comment(?:/|$)`.
 - `Cookies`: optional saved cookie profile.
 - `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
 - `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.

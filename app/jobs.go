@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,32 @@ func (a *App) StartWorkers(ctx context.Context, n int) {
 	for i := 0; i < n; i++ {
 		go a.workerLoop(ctx, i+1)
 	}
+}
+
+func cookieDomainLogSuffix(cookies []browserCookieData) string {
+	seen := map[string]bool{}
+	for _, cookie := range cookies {
+		domain := strings.TrimSpace(cookie.Domain)
+		if domain == "" && cookie.URL != "" {
+			domain = hostFromURL(cookie.URL)
+		}
+		if domain == "" {
+			continue
+		}
+		seen[domain] = true
+	}
+	if len(seen) == 0 {
+		return ""
+	}
+	domains := make([]string, 0, len(seen))
+	for domain := range seen {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	if len(domains) > 8 {
+		return fmt.Sprintf(" across %d domains: %s, +%d more", len(domains), strings.Join(domains[:8], ", "), len(domains)-8)
+	}
+	return fmt.Sprintf(" across %d domains: %s", len(domains), strings.Join(domains, ", "))
 }
 
 func (a *App) workerLoop(ctx context.Context, workerID int) {
@@ -87,12 +114,12 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			return
 		}
 		if len(browserCookies) == 0 {
-			err := fmt.Errorf("cookie profile %q has no cookies relevant to %s", profile.Name, hostFromURL(job.URL))
+			err := fmt.Errorf("cookie profile %q has no valid cookies to import", profile.Name)
 			jobLog("error", err.Error())
 			_ = a.store.FailJob(ctx, job.ID, err)
 			return
 		}
-		jobLog("info", fmt.Sprintf("cookie profile %q selected with %d relevant cookies", profile.Name, len(browserCookies)))
+		jobLog("info", fmt.Sprintf("cookie profile %q selected with %d cookies%s", profile.Name, len(browserCookies), cookieDomainLogSuffix(browserCookies)))
 	}
 	userAgentSetting, _ := a.store.GetSetting(jobCtx, "user_agent")
 	userAgent := effectiveCaptureUserAgent(jobCtx, userAgentSetting)

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"database/sql"
+	"testing"
+)
 
 func TestNetscapeCookieHeader(t *testing.T) {
 	content := ".example.com\tTRUE\t/\tFALSE\t0\tsid\tabc\nother.com\tFALSE\t/\tFALSE\t0\tbad\tno"
@@ -20,17 +23,63 @@ func TestJSONCookieHeader(t *testing.T) {
 	}
 }
 
-func TestBrowserCookiesFromJSON(t *testing.T) {
+func TestBrowserCookiesFromJSONPreservesFullExport(t *testing.T) {
 	cookies, err := browserCookiesFromJSON(`[{"name":"sid","value":"abc","domain":".substack.com","path":"/","secure":true,"httpOnly":true,"sameSite":"no_restriction"},{"name":"bad","value":"no","domain":"other.com"}]`, "https://eventsinukraine.substack.com/p/post")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cookies) != 1 {
-		t.Fatalf("expected 1 relevant cookie, got %d", len(cookies))
+	if len(cookies) != 2 {
+		t.Fatalf("expected full valid cookie export, got %d", len(cookies))
 	}
 	got := cookies[0]
 	if got.Name != "sid" || got.Domain != ".substack.com" || got.Path != "/" || !got.Secure || !got.HTTPOnly || got.SameSite != "None" {
 		t.Fatalf("unexpected browser cookie: %+v", got)
+	}
+	if cookies[1].Name != "bad" || cookies[1].Domain != "other.com" {
+		t.Fatalf("cross-domain cookie should be preserved for browser profile import: %+v", cookies[1])
+	}
+}
+
+func TestBrowserCookiesFromJSONPreservesProviderCookiesForCustomDomains(t *testing.T) {
+	cookies, err := browserCookiesFromJSON(`[{"name":"substack.sid","value":"abc","domain":".substack.com","path":"/","secure":true},{"name":"publication.sid","value":"def","domain":"marsreview.org","path":"/","secure":true}]`, "https://marsreview.org/p/post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cookies) != 2 {
+		t.Fatalf("expected provider and custom-domain cookies, got %d", len(cookies))
+	}
+	if cookies[0].Domain != ".substack.com" || cookies[1].Domain != "marsreview.org" {
+		t.Fatalf("unexpected imported domains: %+v", cookies)
+	}
+}
+
+func TestBrowserCookiesForProfileDoesNotRejectProviderHostLabel(t *testing.T) {
+	profile := &CookieProfileRecord{
+		Name:       "substack",
+		SourceType: "json",
+		Host:       sql.NullString{String: "substack.com", Valid: true},
+		Secret:     sql.NullString{String: `[{"name":"substack.sid","value":"abc","domain":".substack.com","path":"/","secure":true}]`, Valid: true},
+	}
+	cookies, err := browserCookiesForProfile(profile, "https://marsreview.org/p/post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cookies) != 1 || cookies[0].Domain != ".substack.com" {
+		t.Fatalf("expected provider cookie to be imported for custom domain target: %+v", cookies)
+	}
+}
+
+func TestBrowserCookiesFromNetscapePreservesFullExport(t *testing.T) {
+	content := ".substack.com\tTRUE\t/\tTRUE\t1893456000\tsubstack.sid\tabc\nmarsreview.org\tFALSE\t/\tTRUE\t1893456000\tpublication.sid\tdef"
+	cookies := browserCookiesFromNetscape(content, "https://marsreview.org/p/post")
+	if len(cookies) != 2 {
+		t.Fatalf("expected full valid Netscape export, got %d", len(cookies))
+	}
+	if cookies[0].Domain != ".substack.com" {
+		t.Fatalf("subdomain cookie should use domain import: %+v", cookies[0])
+	}
+	if cookies[1].URL != "https://marsreview.org/" {
+		t.Fatalf("host-only cookie should use URL import: %+v", cookies[1])
 	}
 }
 

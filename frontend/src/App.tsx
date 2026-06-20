@@ -1552,7 +1552,7 @@ function CookieProfiles({ profiles, onChanged }: { profiles: CookieProfile[]; on
         <div>
           <span className="field-label">Recommended import</span>
           <strong>Use <a href="https://cookie-editor.com/" target="_blank">Cookie-Editor</a></strong>
-          <p>Install Cookie-Editor, open the authenticated tab, export cookies as JSON, and paste the export below. WARCdriver turns selected cookie profiles into a temporary Browsertrix profile before capture.</p>
+          <p>Install Cookie-Editor, open the authenticated tab, export all cookies as JSON, and paste the export below. WARCdriver imports the full selected export into a temporary Browsertrix profile before capture.</p>
         </div>
       </div>
       <form className="settings-form" onSubmit={submit}>
@@ -1575,8 +1575,8 @@ function CookieProfiles({ profiles, onChanged }: { profiles: CookieProfile[]; on
           </label>
         </div>
         <label>
-          Host
-          <input name="host" placeholder="example.com" />
+          Host label
+          <input name="host" placeholder="optional example.com label" />
         </label>
         {sourceType === "raw_header" ? (
           <label>
