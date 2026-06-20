@@ -45,15 +45,25 @@ body {
   margin: 0;
   background: linear-gradient(180deg, #f7f7f3 0%, var(--bg) 46%, #e4e7e8 100%);
   color: var(--ink);
+  pointer-events: none;
 }
 
-#bit-notification-bar {
+#bit-notification-bar,
+#bit-notification-bar *,
+[id^="bit-notification"],
+[id^="bit-notification"] * {
   pointer-events: none !important;
+}
+
+#bit-notification-bar,
+[id^="bit-notification"] {
+  display: none !important;
 }
 
 #root {
   position: relative;
   isolation: isolate;
+  pointer-events: auto;
 }
 
 a {
