@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="WARCdriver">
-  <rect width="512" height="512" fill="#171918"/>
-  <rect x="84" y="84" width="344" height="344" rx="76" fill="#171918"/>
-  <path d="M136 118h172l74 74v202H136z" fill="#f8f0df"/>
-  <path d="M308 118v74h74z" fill="#d9c8a7"/>
-  <path d="M178 236h156v22H178zm0 56h156v22H178zm0 56h102v22H178z" fill="#171918"/>
-  <path d="M112 112v288h288" fill="none" stroke="#0b6f5f" stroke-width="22" stroke-linecap="round"/>
-</svg>
