@@ -550,6 +550,8 @@ function CaptureDock() {
   const [scope, setScope] = useState<ArchiveScope>("single_page");
   const [depth, setDepth] = useState(0);
   const [unlimitedPages, setUnlimitedPages] = useState(false);
+  const [maxPages, setMaxPages] = useState("100");
+  const [lastLimitedMaxPages, setLastLimitedMaxPages] = useState("100");
 
   useEffect(() => {
     const refreshProfiles = () =>
@@ -571,7 +573,7 @@ function CaptureDock() {
       url: String(form.get("url")),
       scope,
       depth,
-      maxPages: unlimitedPages ? 0 : Number(form.get("maxPages") || 100),
+      maxPages: unlimitedPages ? 0 : Number(maxPages || lastLimitedMaxPages || 100),
       visibility: String(form.get("visibility") || "private") as Visibility,
       enrich: form.get("enrich") === "on"
     };
@@ -588,6 +590,8 @@ function CaptureDock() {
       setScope("single_page");
       setDepth(0);
       setUnlimitedPages(false);
+      setMaxPages("100");
+      setLastLimitedMaxPages("100");
     } catch (err) {
       setMessage(errorMessage(err));
     } finally {
@@ -599,13 +603,31 @@ function CaptureDock() {
     setScope(next);
     if (next === "single_page" || next === "explicit_urls") {
       setDepth(0);
-      setUnlimitedPages(false);
+      updateUnlimitedPages(false);
     } else if (next === "same_subdomain" || next === "prefix") {
       setDepth(-1);
-      setUnlimitedPages(true);
+      updateUnlimitedPages(true);
     } else if (depth < 1) {
       setDepth(1);
-      setUnlimitedPages(false);
+      updateUnlimitedPages(false);
+    }
+  }
+
+  function updateUnlimitedPages(next: boolean) {
+    setUnlimitedPages(next);
+    if (next) {
+      setLastLimitedMaxPages(maxPages || lastLimitedMaxPages || "100");
+      setMaxPages("");
+    } else {
+      setMaxPages(lastLimitedMaxPages || "100");
+    }
+  }
+
+  function updateMaxPages(raw: string) {
+    const next = raw.replace(/\D/g, "");
+    setMaxPages(next);
+    if (next) {
+      setLastLimitedMaxPages(next);
     }
   }
 
@@ -637,7 +659,7 @@ function CaptureDock() {
               <option value="single_page">Single page</option>
               <option value="linked_pages">Linked pages</option>
               <option value="same_subdomain">Subdomain</option>
-              <option value="prefix">Prefix</option>
+              <option value="prefix">URL prefix</option>
               <option value="explicit_urls">Explicit URLs</option>
             </select>
           </label>
@@ -657,16 +679,25 @@ function CaptureDock() {
               />
             )}
           </label>
-          <label className="small-field max-pages-field">
+          <label className={`small-field max-pages-field${unlimitedPages ? " is-disabled" : ""}`}>
             Max pages
-            <input name="maxPages" type="number" min="1" max="1000" defaultValue="100" disabled={unlimitedPages} />
+            <input
+              name="maxPages"
+              type="number"
+              min="1"
+              max="1000"
+              value={maxPages}
+              placeholder={unlimitedPages ? "Unlimited" : "100"}
+              disabled={unlimitedPages}
+              onChange={(event) => updateMaxPages(event.target.value)}
+            />
           </label>
           <label className="check-field unlimited-field">
             <input
               name="unlimitedPages"
               type="checkbox"
               checked={unlimitedPages}
-              onChange={(event) => setUnlimitedPages(event.target.checked)}
+              onChange={(event) => updateUnlimitedPages(event.target.checked)}
             />
             Unlimited
           </label>
@@ -688,13 +719,24 @@ function CaptureDock() {
               <option value="public">Public</option>
             </select>
           </label>
-          <label className="prefix-field">
-            Prefix
-            <input name="prefix" type="url" placeholder="optional" />
-          </label>
+          {scope === "prefix" ? (
+            <label
+              className="prefix-field"
+              title="Crawl only page URLs that start with this URL. Empty uses the seed URL as the prefix."
+            >
+              Prefix URL
+              <input name="prefix" type="url" placeholder="defaults to seed URL prefix" />
+            </label>
+          ) : null}
           <label className="path-filter-field">
             Path exclude regex
-            <input name="pathExcludeRx" type="text" placeholder="optional, e.g. ^/(login|cart)(?:/|$)" spellCheck={false} />
+            <input
+              name="pathExcludeRx"
+              type="text"
+              placeholder="exclude paths, e.g. ^/p/[^/]+/comment(?:/|$)"
+              spellCheck={false}
+              title="Reject candidate page URLs whose path matches this regex after scope matching."
+            />
           </label>
           <label className="check-field">
             <input name="enrich" type="checkbox" defaultChecked />
@@ -1033,6 +1075,7 @@ function ItemPage({ id }: { id: string }) {
                     View
                   </a>
                 )}
+                <RecaptureButton itemID={item.id} />
                 <ConfirmButton
                   className="danger-button"
                   title="Delete item"
@@ -1749,6 +1792,38 @@ function ConfirmButton({
   );
 }
 
+function RecaptureButton({ itemID, compact = false }: { itemID: string; compact?: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function recapture() {
+    setBusy(true);
+    setError("");
+    try {
+      const job = await api.recaptureItem(itemID);
+      window.location.hash = `/jobs/${job.id}`;
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      className={compact ? "icon-button compact-action" : "icon-button"}
+      type="button"
+      onClick={recapture}
+      disabled={busy}
+      title={error || "Queue a replacement capture for this page"}
+      aria-label="Recapture item"
+    >
+      <RefreshCw className={busy ? "spin" : undefined} size={compact ? 14 : 16} />
+      {compact ? "Retry" : "Recapture"}
+    </button>
+  );
+}
+
 type PageSize = 10 | 20 | 50 | "all";
 
 function usePaginatedRows<T>(rows: T[], initialSize: PageSize = 20) {
@@ -1912,6 +1987,7 @@ function ItemTable({ items }: { items: Item[] }) {
                     <span className="muted-pill">Indexed</span>
                   )}
                   <a className="row-link" href={href(`items/${item.id}`)}>Details</a>
+                  <RecaptureButton itemID={item.id} compact />
                 </div>
               </td>
             </tr>

@@ -65,6 +65,7 @@ type ArchiveJobRecord struct {
 	StatusMessage   sql.NullString
 	Error           sql.NullString
 	CaptureID       sql.NullString
+	ReplaceItemID   sql.NullString
 	CreatedAt       time.Time
 	StartedAt       sql.NullTime
 	FinishedAt      sql.NullTime
@@ -205,6 +206,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			status_message TEXT,
 			error TEXT,
 			capture_id TEXT,
+			replace_item_id TEXT,
 			created_at TEXT NOT NULL,
 			started_at TEXT,
 			finished_at TEXT
@@ -417,6 +419,11 @@ func (s *Store) ensureArchiveJobsSchema(ctx context.Context) error {
 	}
 	if _, ok := cols["visibility"]; !ok {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE archive_jobs ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`); err != nil {
+			return err
+		}
+	}
+	if _, ok := cols["replace_item_id"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE archive_jobs ADD COLUMN replace_item_id TEXT`); err != nil {
 			return err
 		}
 	}
@@ -946,13 +953,16 @@ func (s *Store) CreateArchiveJob(ctx context.Context, userID string, req Archive
 	if req.CookieProfileID != "" {
 		rec.CookieProfileID = sql.NullString{String: req.CookieProfileID, Valid: true}
 	}
+	if req.ReplaceItemID != "" {
+		rec.ReplaceItemID = sql.NullString{String: req.ReplaceItemID, Valid: true}
+	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO archive_jobs(
 			id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			visibility, use_browser_profile, enrich, status, created_at
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			visibility, use_browser_profile, enrich, status, capture_id, replace_item_id, created_at
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.UserID, rec.URL, rec.URLsJSON, rec.Scope, rec.Depth, rec.MaxPages,
 		rec.Prefix, rec.PathExcludeRx, rec.CookieProfileID, rec.Visibility, 0, boolInt(rec.Enrich),
-		rec.Status, formatTime(now))
+		rec.Status, rec.CaptureID, rec.ReplaceItemID, formatTime(now))
 	return rec, err
 }
 
@@ -967,6 +977,7 @@ type ArchiveJobCreate struct {
 	CookieProfileID string
 	Visibility      string
 	Enrich          bool
+	ReplaceItemID   string
 }
 
 func (s *Store) ClaimNextArchiveJob(ctx context.Context) (*ArchiveJobRecord, error) {
@@ -977,7 +988,7 @@ func (s *Store) ClaimNextArchiveJob(ctx context.Context) (*ArchiveJobRecord, err
 	defer tx.Rollback()
 
 	row := tx.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
+			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, replace_item_id, created_at, started_at, finished_at
 		FROM archive_jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1`, StatusQueued)
 	rec, err := scanArchiveJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1009,14 +1020,14 @@ func (s *Store) RequeueRunningJobs(ctx context.Context) error {
 
 func (s *Store) GetArchiveJob(ctx context.Context, id string) (*ArchiveJobRecord, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
+			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, replace_item_id, created_at, started_at, finished_at
 		FROM archive_jobs WHERE id = ?`, id)
 	return scanArchiveJob(row)
 }
 
 func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
-			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, created_at, started_at, finished_at
+			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, replace_item_id, created_at, started_at, finished_at
 		FROM archive_jobs ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1036,7 +1047,7 @@ func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRec
 func (s *Store) ListArchiveJobsVisible(ctx context.Context, user *UserRecord, limit int) ([]ArchiveJobRecord, error) {
 	userID, isAdmin := accessArgs(user)
 	rows, err := s.db.QueryContext(ctx, `SELECT j.id, j.user_id, j.url, j.urls_json, j.scope, j.depth, j.max_pages, j.prefix, j.path_exclude_rx, j.cookie_profile_id,
-			j.visibility, j.use_browser_profile, j.enrich, j.status, j.status_message, j.error, j.capture_id, j.created_at, j.started_at, j.finished_at
+			j.visibility, j.use_browser_profile, j.enrich, j.status, j.status_message, j.error, j.capture_id, j.replace_item_id, j.created_at, j.started_at, j.finished_at
 		FROM archive_jobs j
 		LEFT JOIN captures c ON c.id = j.capture_id
 		WHERE ? = 1 OR j.user_id = ? OR c.visibility = 'public'
@@ -1059,7 +1070,7 @@ func (s *Store) ListArchiveJobsVisible(ctx context.Context, user *UserRecord, li
 func (s *Store) GetArchiveJobVisible(ctx context.Context, id string, user *UserRecord) (*ArchiveJobRecord, error) {
 	userID, isAdmin := accessArgs(user)
 	row := s.db.QueryRowContext(ctx, `SELECT j.id, j.user_id, j.url, j.urls_json, j.scope, j.depth, j.max_pages, j.prefix, j.path_exclude_rx, j.cookie_profile_id,
-			j.visibility, j.use_browser_profile, j.enrich, j.status, j.status_message, j.error, j.capture_id, j.created_at, j.started_at, j.finished_at
+			j.visibility, j.use_browser_profile, j.enrich, j.status, j.status_message, j.error, j.capture_id, j.replace_item_id, j.created_at, j.started_at, j.finished_at
 		FROM archive_jobs j
 		LEFT JOIN captures c ON c.id = j.capture_id
 		WHERE j.id = ? AND (? = 1 OR j.user_id = ? OR c.visibility = 'public')`, id, boolInt(isAdmin), userID)
@@ -1073,7 +1084,7 @@ func scanArchiveJob(row interface{ Scan(dest ...any) error }) (*ArchiveJobRecord
 	var ignoredUseProfile, enrich int
 	err := row.Scan(&rec.ID, &rec.UserID, &rec.URL, &rec.URLsJSON, &rec.Scope, &rec.Depth, &rec.MaxPages,
 		&rec.Prefix, &rec.PathExcludeRx, &rec.CookieProfileID, &rec.Visibility, &ignoredUseProfile, &enrich, &rec.Status, &rec.StatusMessage,
-		&rec.Error, &rec.CaptureID, &created, &started, &finished)
+		&rec.Error, &rec.CaptureID, &rec.ReplaceItemID, &created, &started, &finished)
 	if err != nil {
 		return nil, err
 	}
@@ -1394,6 +1405,30 @@ func (s *Store) CreateItem(ctx context.Context, rec ItemRecord) (*ItemRecord, er
 		return nil, err
 	}
 	return &rec, nil
+}
+
+func (s *Store) ReplaceItem(ctx context.Context, itemID string, rec ItemRecord) (*ItemRecord, error) {
+	now := time.Now().UTC()
+	if rec.TagsJSON == "" {
+		rec.TagsJSON = "[]"
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE items SET
+			job_id = ?, capture_id = ?, site_id = ?, url = ?, canonical_url = ?, title = ?, summary = ?, tags_json = ?,
+			replayable = ?, depth = ?, status_code = ?, content_type = ?, markdown_path = ?, created_at = ?
+		WHERE id = ?`,
+		rec.JobID, rec.CaptureID, rec.SiteID, rec.URL, rec.CanonicalURL, rec.Title, rec.Summary, rec.TagsJSON,
+		boolInt(rec.Replayable), rec.Depth, rec.StatusCode, rec.ContentType, rec.MarkdownPath, formatTime(now), itemID)
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return s.GetItem(ctx, itemID)
 }
 
 func (s *Store) SetItemMarkdownPath(ctx context.Context, itemID, path string) error {

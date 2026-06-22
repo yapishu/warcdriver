@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -42,6 +43,9 @@ func captureTimeout(maxPages int) time.Duration {
 }
 
 func capturedPageFailureReason(page CapturedPage) string {
+	if reason := capturedPageRateLimitReason(page); reason != "" {
+		return reason
+	}
 	if page.StatusCode >= 400 {
 		return fmt.Sprintf("captured main page returned HTTP %d", page.StatusCode)
 	}
@@ -62,6 +66,27 @@ func capturedPageFailureReason(page CapturedPage) string {
 	for _, indicator := range blockIndicators {
 		if strings.Contains(text, indicator) {
 			return fmt.Sprintf("captured main page looks like a browser or bot-block error page: %q", indicator)
+		}
+	}
+	return ""
+}
+
+func capturedPageRateLimitReason(page CapturedPage) string {
+	if page.StatusCode == http.StatusTooManyRequests {
+		return "captured page was rate limited with HTTP 429"
+	}
+	text := strings.ToLower(page.Title + "\n" + page.Markdown)
+	rateLimitIndicators := []string{
+		"too many requests",
+		"you are being rate limited",
+		"rate limit exceeded",
+		"rate limited",
+		"error 429",
+		"http 429",
+	}
+	for _, indicator := range rateLimitIndicators {
+		if strings.Contains(text, indicator) {
+			return fmt.Sprintf("captured page looks rate limited: %q", indicator)
 		}
 	}
 	return ""

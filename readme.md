@@ -19,10 +19,10 @@ Open `http://localhost:8808/` and log in with the bootstrap admin account.
 The capture form creates Browsertrix jobs. Useful fields:
 
 - `URL`: seed URL.
-- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`.
+- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
 - `Depth`: link traversal depth. Broad scopes use `All`.
 - `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
-- `Path exclude regex`: a regular expression matched against URL paths before pages are queued, for example `^/(login|cart)(?:/|$)` or `^/p/[^/]+/comment(?:/|$)`.
+- `Path exclude regex`: a regular expression matched against candidate URL paths after scope matching, before pages are queued, for example `^/(login|cart)(?:/|$)` or `^/p/[^/]+/comment(?:/|$)`.
 - `Cookies`: optional saved cookie profile.
 - `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
 - `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
@@ -42,7 +42,7 @@ Recommended flow:
 1. Install Cookie-Editor in your browser.
 2. Open the authenticated site.
 3. Export cookies as JSON.
-4. Add a WARCdriver cookie profile with source `JSON` and an optional host filter.
+4. Add a WARCdriver cookie profile with source `JSON` and an optional host label.
 5. Select that profile when capturing.
 
 Cookie profiles are stored in SQLite under `DATA_DIR`. WACZ/WARC output is not scrubbed after capture, so authenticated captures may contain sensitive request or response data.

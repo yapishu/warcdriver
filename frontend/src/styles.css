@@ -102,6 +102,15 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(14, 111, 99, 0.12);
 }
 
+input:disabled,
+select:disabled,
+textarea:disabled {
+  border-color: #d9ddd9;
+  background: #e9ece8;
+  color: #8c948f;
+  cursor: not-allowed;
+}
+
 textarea {
   resize: vertical;
 }
@@ -325,6 +334,10 @@ button:disabled {
   flex-basis: 124px;
 }
 
+.max-pages-field.is-disabled {
+  color: #8c948f;
+}
+
 .static-input {
   min-height: 38px;
   display: flex;
@@ -421,6 +434,12 @@ button:disabled {
 }
 
 .compact-view {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.compact-action {
   min-height: 30px;
   padding: 5px 9px;
   font-size: 12px;

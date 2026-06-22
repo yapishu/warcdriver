@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeURL(t *testing.T) {
 	got := normalizeURL("HTTPS://Example.COM:443/path?a=1#frag")
@@ -33,6 +36,12 @@ func TestMarkdownFromText(t *testing.T) {
 func TestCapturedPageFailureReason(t *testing.T) {
 	if reason := capturedPageFailureReason(CapturedPage{StatusCode: 403}); reason == "" {
 		t.Fatal("expected HTTP error capture to fail")
+	}
+	if reason := capturedPageFailureReason(CapturedPage{StatusCode: 429}); !strings.Contains(reason, "rate limited") {
+		t.Fatalf("expected HTTP 429 capture to be treated as rate limited, got %q", reason)
+	}
+	if reason := capturedPageFailureReason(CapturedPage{StatusCode: 200, Markdown: "Too many requests"}); !strings.Contains(reason, "rate limited") {
+		t.Fatalf("expected text rate limit page to fail, got %q", reason)
 	}
 	if reason := capturedPageFailureReason(CapturedPage{StatusCode: 200, Markdown: "Something has gone terribly wrong :("}); reason == "" {
 		t.Fatal("expected browser error capture to fail")

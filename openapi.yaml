@@ -332,6 +332,24 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /api/items/{id}/recapture:
+    post:
+      operationId: recaptureItem
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "202":
+          description: Replacement job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchiveJob"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/warcs/{id}/download:
     get:
       operationId: downloadWarc

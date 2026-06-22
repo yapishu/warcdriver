@@ -363,6 +363,9 @@ type ServerInterface interface {
 	// (GET /api/items/{id})
 	GetItem(w http.ResponseWriter, r *http.Request, id Id)
 
+	// (POST /api/items/{id}/recapture)
+	RecaptureItem(w http.ResponseWriter, r *http.Request, id Id)
+
 	// (GET /api/me)
 	GetMe(w http.ResponseWriter, r *http.Request)
 
@@ -472,6 +475,11 @@ func (_ Unimplemented) DeleteItem(w http.ResponseWriter, r *http.Request, id Id)
 
 // (GET /api/items/{id})
 func (_ Unimplemented) GetItem(w http.ResponseWriter, r *http.Request, id Id) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /api/items/{id}/recapture)
+func (_ Unimplemented) RecaptureItem(w http.ResponseWriter, r *http.Request, id Id) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -931,6 +939,39 @@ func (siw *ServerInterfaceWrapper) GetItem(w http.ResponseWriter, r *http.Reques
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetItem(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RecaptureItem operation middleware
+func (siw *ServerInterfaceWrapper) RecaptureItem(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RecaptureItem(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1489,6 +1530,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/items/{id}", wrapper.GetItem)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/items/{id}/recapture", wrapper.RecaptureItem)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/me", wrapper.GetMe)

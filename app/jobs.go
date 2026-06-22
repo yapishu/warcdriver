@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,12 @@ import (
 	"strings"
 	"time"
 )
+
+var rateLimitRetryDelays = []time.Duration{
+	30 * time.Second,
+	2 * time.Minute,
+	5 * time.Minute,
+}
 
 func (a *App) StartWorkers(ctx context.Context, n int) {
 	if err := a.store.RequeueRunningJobs(ctx); err != nil {
@@ -142,7 +149,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		jobLog(level, message)
 		_ = a.store.UpdateJobMessage(context.Background(), job.ID, message)
 	}
-	result, err := a.captureArchiveWithBrowsertrix(jobCtx, BrowsertrixCaptureOptions{
+	captureOptions := BrowsertrixCaptureOptions{
 		JobID:         job.ID,
 		StartURL:      job.URL,
 		ExplicitURLs:  explicit,
@@ -159,21 +166,18 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		PageRetries:   pageRetries,
 		UseSitemap:    useSitemap,
 		OnLog:         onCaptureLog,
-	})
+	}
+
+	result, err := a.captureWithRateLimitBackoff(jobCtx, captureOptions, jobLog)
 	if err != nil {
 		if jobCtx.Err() != nil {
 			jobLog("warn", "capture canceled")
 			_, _ = a.store.CancelJob(context.Background(), job.ID)
-			return
+		} else {
+			jobLog("error", err.Error())
+			a.discardBrowsertrixRun(job.ID, jobLog)
+			_ = a.store.FailJob(context.Background(), job.ID, err)
 		}
-		jobLog("error", err.Error())
-		_ = a.store.FailJob(context.Background(), job.ID, err)
-		return
-	}
-	if len(result.Pages) == 0 {
-		err := fmt.Errorf("no pages captured")
-		jobLog("error", err.Error())
-		_ = a.store.FailJob(context.Background(), job.ID, err)
 		return
 	}
 
@@ -181,6 +185,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	if reason := capturedPageFailureReason(first); reason != "" {
 		err := fmt.Errorf("%s", reason)
 		jobLog("error", err.Error())
+		a.discardBrowsertrixRun(job.ID, jobLog)
 		_ = a.store.FailJob(context.Background(), job.ID, err)
 		return
 	}
@@ -203,11 +208,30 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		return
 	}
 
+	shouldEnrich, _ := a.enrichmentEnabled(jobCtx)
+	if job.ReplaceItemID.Valid {
+		if err := a.replaceCapturedItem(jobCtx, job, capture, site, first, shouldEnrich, jobLog); err != nil {
+			jobLog("error", err.Error())
+			_ = a.store.FailJob(context.Background(), job.ID, err)
+			return
+		}
+		if err := a.store.FinishJob(context.Background(), job.ID, capture.ID); err != nil {
+			log.Printf("finish job %s: %v", job.ID, err)
+		}
+		jobLog("info", "job complete: replaced archived item")
+		return
+	}
+
+	indexed := 0
 	for _, page := range result.Pages {
 		if jobCtx.Err() != nil {
 			jobLog("warn", "capture canceled during indexing")
 			_, _ = a.store.CancelJob(context.Background(), job.ID)
 			return
+		}
+		if reason := capturedPageFailureReason(page); reason != "" {
+			jobLog("warn", fmt.Sprintf("skip captured page %s: %s", page.URL, reason))
+			continue
 		}
 		item, err := a.store.CreateItem(jobCtx, ItemRecord{
 			JobID:        job.ID,
@@ -235,19 +259,138 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		} else {
 			_ = a.store.SetItemMarkdownPath(jobCtx, item.ID, mdPath)
 		}
-		if shouldEnrich, _ := a.enrichmentEnabled(jobCtx); job.Enrich && shouldEnrich {
+		if job.Enrich && shouldEnrich {
 			if summary, tags, err := a.enrichMarkdown(jobCtx, page.Markdown); err == nil {
 				_ = a.store.UpdateItemEnrichment(jobCtx, item.ID, summary, tags)
 			} else {
 				jobLog("warn", "OpenRouter enrichment failed: "+err.Error())
 			}
 		}
+		indexed++
+	}
+
+	if indexed == 0 {
+		err := fmt.Errorf("no usable pages captured")
+		jobLog("error", err.Error())
+		a.discardBrowsertrixRun(job.ID, jobLog)
+		_ = a.store.FailJob(context.Background(), job.ID, err)
+		return
 	}
 
 	if err := a.store.FinishJob(context.Background(), job.ID, capture.ID); err != nil {
 		log.Printf("finish job %s: %v", job.ID, err)
 	}
-	jobLog("info", fmt.Sprintf("job complete: captured %d pages", len(result.Pages)))
+	jobLog("info", fmt.Sprintf("job complete: captured %d pages", indexed))
+}
+
+func (a *App) captureWithRateLimitBackoff(ctx context.Context, opts BrowsertrixCaptureOptions, jobLog func(level, msg string)) (*CaptureResult, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := a.captureArchiveWithBrowsertrix(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		if len(result.Pages) == 0 {
+			a.discardBrowsertrixRun(opts.JobID, jobLog)
+			return nil, fmt.Errorf("no pages captured")
+		}
+		if reason := capturedPageRateLimitReason(result.Pages[0]); reason != "" {
+			a.discardBrowsertrixRun(opts.JobID, jobLog)
+			if attempt >= len(rateLimitRetryDelays) {
+				return nil, fmt.Errorf("%s after %d attempts", reason, attempt+1)
+			}
+			delay := rateLimitRetryDelays[attempt]
+			message := fmt.Sprintf("%s; retrying in %s", reason, delay.Round(time.Second))
+			jobLog("warn", message)
+			_ = a.store.UpdateJobMessage(context.Background(), opts.JobID, message)
+			if err := waitForRetry(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return result, nil
+	}
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (a *App) discardBrowsertrixRun(jobID string, jobLog func(level, msg string)) {
+	if jobID == "" {
+		return
+	}
+	if err := os.RemoveAll(a.browsertrixCollectionDir(jobID)); err != nil {
+		jobLog("warn", "failed to discard rejected archive: "+err.Error())
+	}
+}
+
+func (a *App) replaceCapturedItem(ctx context.Context, job *ArchiveJobRecord, capture *CaptureRecord, site *SiteRecord, page CapturedPage, shouldEnrich bool, jobLog func(level, msg string)) error {
+	if _, err := a.store.GetItem(ctx, job.ReplaceItemID.String); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("replacement item not found")
+		}
+		return err
+	}
+	rec := itemRecordForCapturedPage(job, capture, site, page)
+	mdPath, err := a.writeCapturedMarkdown(capture.ID, job.ReplaceItemID.String, page.Markdown)
+	if err != nil {
+		return err
+	}
+	rec.MarkdownPath = sqlNullString(mdPath)
+	if job.Enrich && shouldEnrich {
+		if summary, tags, err := a.enrichMarkdown(ctx, page.Markdown); err == nil {
+			rec.Summary = sqlNullString(summary)
+			rawTags, marshalErr := json.Marshal(tags)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			rec.TagsJSON = string(rawTags)
+		} else {
+			jobLog("warn", "OpenRouter enrichment failed: "+err.Error())
+		}
+	}
+	if _, err := a.store.ReplaceItem(ctx, job.ReplaceItemID.String, rec); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("replacement item not found")
+		}
+		return err
+	}
+	return nil
+}
+
+func itemRecordForCapturedPage(job *ArchiveJobRecord, capture *CaptureRecord, site *SiteRecord, page CapturedPage) ItemRecord {
+	return ItemRecord{
+		JobID:        job.ID,
+		CaptureID:    capture.ID,
+		SiteID:       site.ID,
+		URL:          page.URL,
+		CanonicalURL: sqlNullString(page.CanonicalURL),
+		Title:        firstNonEmpty(page.Title, page.URL),
+		Summary:      sqlNullString(localSummary(page.Markdown)),
+		TagsJSON:     "[]",
+		Replayable:   page.Replayable,
+		Depth:        page.Depth,
+		StatusCode:   sqlNullInt(page.StatusCode),
+		ContentType:  sqlNullString(page.ContentType),
+	}
+}
+
+func (a *App) writeCapturedMarkdown(captureID, itemID, markdown string) (string, error) {
+	mdPath := a.store.MarkdownPath(captureID, itemID)
+	if err := os.MkdirAll(filepath.Dir(mdPath), 0o755); err != nil {
+		return "", fmt.Errorf("failed to create markdown dir: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(markdown), 0o644); err != nil {
+		return "", fmt.Errorf("failed to write markdown: %w", err)
+	}
+	return mdPath, nil
 }
 
 func (a *App) setActiveJob(jobID string, cancel context.CancelFunc) {

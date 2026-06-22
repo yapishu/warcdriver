@@ -592,6 +592,63 @@ func (a *App) GetItem(w http.ResponseWriter, r *http.Request, id api.Id) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
+func (a *App) RecaptureItem(w http.ResponseWriter, r *http.Request, id api.Id) {
+	user, _ := userFromContext(r.Context())
+	item, err := a.store.GetItemVisible(r.Context(), id, user)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "item not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	capture, err := a.store.GetCapture(r.Context(), item.CaptureID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "capture not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !userCanManageCapture(user, capture) {
+		writeError(w, http.StatusForbidden, "capture owner or admin required")
+		return
+	}
+
+	req := ArchiveJobCreate{
+		URL:           item.URL,
+		Scope:         "single_page",
+		Depth:         0,
+		MaxPages:      1,
+		Visibility:    capture.Visibility,
+		Enrich:        true,
+		ReplaceItemID: item.ID,
+	}
+	if original, err := a.store.GetArchiveJob(r.Context(), item.JobID); err == nil {
+		req.Enrich = original.Enrich
+		if original.CookieProfileID.Valid {
+			req.CookieProfileID = original.CookieProfileID.String
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	userID := ""
+	if user != nil {
+		userID = user.ID
+	}
+	job, err := a.store.CreateArchiveJob(r.Context(), userID, req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = a.store.AddJobLog(r.Context(), job.ID, "info", "replacement job queued")
+	writeJSON(w, http.StatusAccepted, apiArchiveJob(job))
+}
+
 func (a *App) DeleteItem(w http.ResponseWriter, r *http.Request, id api.Id) {
 	user, _ := userFromContext(r.Context())
 	item, err := a.store.GetItemVisible(r.Context(), id, user)

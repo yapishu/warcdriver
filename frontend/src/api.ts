@@ -103,6 +103,7 @@ export const api = {
     return request<{ items: Item[] }>(`/api/items?${query}`);
   },
   item: (id: string) => request<ItemDetail>(`/api/items/${id}`),
+  recaptureItem: (id: string) => request<ArchiveJob>(`/api/items/${id}/recapture`, { method: "POST" }),
   deleteItem: (id: string) => request<void>(`/api/items/${id}`, { method: "DELETE" }),
   warcMetadata: (id: string) => request<WarcMetadata>(`/api/warcs/${id}/metadata`),
   updateWarcVisibility: (id: string, visibility: Visibility) =>
