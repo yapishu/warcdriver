@@ -27,7 +27,7 @@ import {
   Trash2,
   XCircle
 } from "lucide-react";
-import React, { FormEvent, ReactNode, useCallback, useEffect, useState } from "react";
+import React, { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, type CreateJobPayload } from "./api";
 import type {
   ArchiveJob,
@@ -66,6 +66,15 @@ type ConfirmButtonProps = {
   confirmLabel?: string;
   children: ReactNode;
   onConfirm: () => Promise<void> | void;
+};
+
+type ReplayWebPageElement = HTMLElement & { shadowRoot?: ShadowRoot };
+
+type ReplayURLChangeDetail = {
+  url?: string;
+  ts?: string;
+  title?: string;
+  replayNotFoundError?: boolean;
 };
 
 const routeLinks = [
@@ -322,6 +331,61 @@ function replayHostLabel(rawURL: string) {
   } catch {
     return rawURL || "Archived page";
   }
+}
+
+function isHTTPURL(rawURL: string) {
+  try {
+    const parsed = new URL(rawURL);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function replaceViewerTargetURLParam(rawURL: string) {
+  const next = new URL(window.location.href);
+  if (next.searchParams.get("url") === rawURL) return;
+  next.searchParams.set("url", rawURL);
+  window.history.replaceState({}, "", next);
+}
+
+function decodeMaybe(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function rawDocumentReplayTarget(frameURL: string) {
+  const decoded = decodeMaybe(frameURL);
+  const match = decoded.match(/\/(?:\d{1,17})?id_\/(https?:\/\/.+)$/);
+  if (!match?.[1]) return "";
+  try {
+    return new URL(match[1]).href;
+  } catch {
+    return "";
+  }
+}
+
+function replayDocumentFrame(embed: ReplayWebPageElement | null) {
+  try {
+    const outerFrame = embed?.shadowRoot?.querySelector("iframe") as HTMLIFrameElement | null;
+    const frameDoc = outerFrame?.contentDocument;
+    const app = frameDoc?.querySelector("replay-app-main") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
+    const item = app?.shadowRoot?.querySelector("wr-item") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
+    const collection = item?.shadowRoot?.querySelector("wr-coll-replay") as (HTMLElement & { shadowRoot?: ShadowRoot }) | null;
+    return collection?.shadowRoot?.querySelector("iframe") as HTMLIFrameElement | null;
+  } catch {
+    return null;
+  }
+}
+
+function currentRawReplayDocumentTarget(embed: ReplayWebPageElement | null) {
+  const frame = replayDocumentFrame(embed);
+  const frameURL = frame?.contentWindow?.location.href || frame?.src || "";
+  if (!frameURL) return { frameURL: "", targetURL: "" };
+  return { frameURL, targetURL: rawDocumentReplayTarget(frameURL) };
 }
 
 function upsertScopedStyle(root: Document | ShadowRoot | null | undefined, id: string, cssText: string) {
@@ -1329,9 +1393,26 @@ function ReplayPage({ id }: { id: string }) {
   const source = `${window.location.origin}${warcDownloadHref(id)}`;
   const initialURL = new URLSearchParams(window.location.search).get("url") || "";
   const [targetURL, setTargetURL] = useState(initialURL);
+  const [replayReloadKey, setReplayReloadKey] = useState(0);
   const [error, setError] = useState("");
   const [darkMode, setDarkMode] = useState(storedReplayDarkMode);
   const [chromeHidden, setChromeHidden] = useState(storedReplayChromeHidden);
+  const replayRef = useRef<ReplayWebPageElement | null>(null);
+  const targetURLRef = useRef(targetURL);
+  const lastRawRepairRef = useRef("");
+
+  useEffect(() => {
+    targetURLRef.current = targetURL;
+  }, [targetURL]);
+
+  const applyReplayTarget = useCallback((nextURL: string, forceReload = false) => {
+    if (!isHTTPURL(nextURL)) return;
+    replaceViewerTargetURLParam(nextURL);
+    setTargetURL((currentURL) => (currentURL === nextURL ? currentURL : nextURL));
+    if (forceReload && targetURLRef.current === nextURL) {
+      setReplayReloadKey((key) => key + 1);
+    }
+  }, []);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
@@ -1347,7 +1428,7 @@ function ReplayPage({ id }: { id: string }) {
     api
       .warcMetadata(id)
       .then((metadata) => {
-        if (alive) setTargetURL(metadata.startUrl);
+        if (alive) applyReplayTarget(metadata.startUrl);
       })
       .catch((err) => {
         if (alive) setError(errorMessage(err));
@@ -1355,19 +1436,45 @@ function ReplayPage({ id }: { id: string }) {
     return () => {
       alive = false;
     };
-  }, [id, targetURL]);
+  }, [applyReplayTarget, id, targetURL]);
 
   useEffect(() => {
     writeReplayDarkMode(darkMode);
     writeReplayChromeHidden(chromeHidden);
-    syncReplayBrowserChrome(darkMode, chromeHidden);
-    const interval = window.setInterval(() => syncReplayBrowserChrome(darkMode, chromeHidden), 500);
-    const stop = window.setTimeout(() => window.clearInterval(interval), 7000);
+    const sync = () => {
+      syncReplayBrowserChrome(darkMode, chromeHidden);
+
+      const rawReplay = currentRawReplayDocumentTarget(replayRef.current);
+      if (!rawReplay.targetURL) {
+        lastRawRepairRef.current = "";
+        return;
+      }
+      if (lastRawRepairRef.current === rawReplay.frameURL) return;
+      lastRawRepairRef.current = rawReplay.frameURL;
+      applyReplayTarget(rawReplay.targetURL, true);
+    };
+
+    sync();
+    const interval = window.setInterval(sync, 750);
     return () => {
       window.clearInterval(interval);
-      window.clearTimeout(stop);
     };
-  }, [chromeHidden, darkMode, id, targetURL]);
+  }, [applyReplayTarget, chromeHidden, darkMode, id, targetURL]);
+
+  useEffect(() => {
+    const replay = replayRef.current;
+    if (!replay) return;
+
+    const handleURLChange = (event: Event) => {
+      const detail = (event as CustomEvent<ReplayURLChangeDetail>).detail;
+      if (detail?.url) {
+        applyReplayTarget(detail.url);
+      }
+    };
+
+    replay.addEventListener("rwp-url-change", handleURLChange);
+    return () => replay.removeEventListener("rwp-url-change", handleURLChange);
+  }, [applyReplayTarget, targetURL]);
 
   return (
     <main className={`warc-viewer-page ${darkMode ? "viewer-dark" : ""} ${chromeHidden ? "viewer-chrome-hidden" : ""}`}>
@@ -1400,10 +1507,14 @@ function ReplayPage({ id }: { id: string }) {
       <div className="warc-viewer-stage">
         {targetURL ? (
           React.createElement("replay-web-page", {
+            key: `${id}:${replayReloadKey}`,
+            ref: (node: ReplayWebPageElement | null) => {
+              replayRef.current = node;
+            },
             replayBase: "/api/warcs/",
             source,
             url: targetURL,
-            embed: "default"
+            embed: "replayonly"
           })
         ) : (
           <div className="warc-viewer-loading">{error || "Loading archived page..."}</div>
