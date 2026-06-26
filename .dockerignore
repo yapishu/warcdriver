@@ -1,0 +1,9 @@
+.git
+data
+desk
+app/warcdrive
+app/frontend/dist
+frontend/node_modules
+frontend/dist
+frontend/public/replay
+*.warc.gz

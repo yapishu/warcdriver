@@ -1,67 +1,136 @@
-# %warc
+# WARCdriver
 
-A personal web archiver for Urbit. Save snapshots of web pages as standards-compliant WARC 1.1 files and upload them to S3.
+WARCdriver is a self-hosted personal web archive. It accepts authenticated capture jobs, runs Browsertrix Crawler, stores WACZ/WARC files and markdown extracts, indexes captured pages in SQLite, and serves a catalog UI with embedded replay.
 
-<img width="1036" height="498" alt="image" src="https://github.com/user-attachments/assets/98bd3e4d-a496-4a6e-98cf-a774d1e151e0" />
+## Run
 
-## Background
-
-The original version of this app was a Go backend (`app/`) that used Chrome DevTools Protocol via chromedp to capture full-fidelity page archives, including a BFS crawler for same-domain link discovery. The Go server produced individually gzipped WARC records and handled page rendering, subresource capture, and WARC serialization server-side.
-
-The current version is a pure Urbit app — a Gall agent with an in-browser WARC writer. Instead of requiring a headless Chrome instance, the archiving happens entirely in the browser: the agent proxies HTTP fetches through Iris, the browser assembles the WARC file (with gzip compression via DecompressionStream/CompressionStream), and uploads the result to S3 with SigV4 signing.
-
-## How it works
-
-1. **Enter a URL** in the Archive tab. The frontend discovers subresources (stylesheets, scripts, images, fonts, CSS `url()` references) by parsing the HTML and crawling linked stylesheets.
-
-2. **The agent fetches** each URL via `%iris` (Urbit's HTTP client vane) and returns the responses to the browser.
-
-3. **The browser builds** a WARC 1.1 file containing a `warcinfo` record, a `request`/`response` pair for each resource, and rewrites the HTML to use `data:` URIs for self-contained replay. The WARC is individually gzipped per record.
-
-4. **Upload to S3** using SigV4 request signing computed in-browser. The WARC file is stored with `public-read` ACL for easy sharing.
-
-5. **Bookmark it.** The URL, title, tags, and S3 path are saved to the agent's state. The WARC viewer tab can decompress and render archived pages inline.
-
-## Architecture
-
-### Urbit agent (`desk/`)
-
-```
-app/warc.hoon       Gall agent: Eyre HTTP binding, bookmark CRUD, Iris fetch proxy
-sur/warc.hoon       Types: bookmark, bookmark-id, action
-site/warc.js        Frontend: WARC writer, S3 upload (SigV4), subresource discovery
-site/index.html     Three tabs: Archive, Bookmarks, Settings
-site/style.css      Dark theme
+```bash
+export PUID="$(id -u)"
+export PGID="$(id -g)"
+export WARC_ADMIN_USERNAME="reid"
+export WARC_ADMIN_PASSWORD="choose-a-real-password"
+docker compose up -d --build
 ```
 
-### Go backend (legacy, `app/`)
+Open `http://localhost:8808/` and log in with the bootstrap admin account.
 
-```
-main.go             HTTP server with /archive and /crawl endpoints, Chrome allocator
-archive.go          Full page capture via Chrome DevTools Protocol
-crawl.go            BFS crawler for same-domain link discovery
-warc.go             WARC 1.1 writer with individual gzip compression
-```
+## Captures
 
-The Go version requires a running Chrome/Chromium instance and produces higher-fidelity captures (full DOM snapshots including JS-rendered content). The Urbit version trades some capture fidelity for zero external dependencies — everything runs in your browser and your ship.
+The capture form creates Browsertrix jobs. Useful fields:
 
-## State
+- `URL`: seed URL.
+- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
+- `Depth`: link traversal depth. Broad scopes use `All`.
+- `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
+- `Path exclude regex`: a regular expression matched against candidate URL paths after scope matching, before pages are queued, for example `^/(login|cart)(?:/|$)` or `^/p/[^/]+/comment(?:/|$)`.
+- `Cookies`: optional saved cookie profile.
+- `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
+- `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
 
-The agent stores:
-- `bookmarks=(map bookmark-id bookmark)` — saved archives with URL, title, tags, S3 path
-- `fetches=(map @ta fetch-batch)` — in-flight Iris fetch batches
+Public captures use unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access.
+
+## Cookies
+
+Use Settings -> Cookie profiles to store cookies for authenticated captures. Supported import formats:
+
+- Cookie-Editor JSON export.
+- Netscape `cookies.txt`.
+- Raw `Cookie` header.
+
+Recommended flow:
+
+1. Install Cookie-Editor in your browser.
+2. Open the authenticated site.
+3. Export cookies as JSON.
+4. Add a WARCdriver cookie profile with source `JSON` and an optional host label.
+5. Select that profile when capturing.
+
+Cookie profiles are stored in SQLite under `DATA_DIR`. WACZ/WARC output is not scrubbed after capture, so authenticated captures may contain sensitive request or response data.
 
 ## API
 
-Served via Eyre at `/apps/warc/`.
+The API is defined in `openapi.yaml`; generated Go bindings live in `app/internal/api/openapi.gen.go`.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/bookmarks` | List all bookmarks |
-| POST | `/api/action` | Save, delete, add/remove tags |
-| POST | `/api/fetch` | Proxy-fetch a list of URLs via Iris |
-| GET | `/api/fetch/:batch-id` | Poll fetch batch results |
+Example job:
 
-## S3 Configuration
+```bash
+curl -X POST http://localhost:8808/api/archive-jobs \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $WARC_API_TOKEN" \
+  -d '{
+    "url": "https://example.com/",
+    "scope": "single_page",
+    "maxPages": 100,
+    "visibility": "private"
+  }'
+```
 
-Enter your S3 endpoint, bucket, access key, and secret key in the Settings tab. Credentials are stored in browser localStorage (not on the ship). WARC files are uploaded with `public-read` ACL.
+Admin users can manage accounts at `/api/users` and from the Users screen. There is no public registration.
+
+## Environment
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PUID` | `1000` | Host UID used by compose services. |
+| `PGID` | `1000` | Host GID used by compose services. |
+| `DATA_DIR` | `/data` | Data directory for SQLite, WACZ/WARC files, markdown, filters, and Browsertrix queues. |
+| `ADDR` | `:8808` | HTTP listen address for the Go service. |
+| `ARCHIVE_WORKERS` | `1` | Number of archive job workers in the Go service. |
+| `WARC_ADMIN_USERNAME` | `admin` | Username for the first bootstrapped admin. |
+| `WARC_ADMIN_EMAIL` | empty | Optional email for the first admin. |
+| `WARC_ADMIN_NAME` | username | Display name for the first admin. |
+| `WARC_ADMIN_PASSWORD` | generated | Password for the first admin. Generated and logged if unset. |
+| `WARC_API_TOKEN` | empty | Optional bootstrap bearer token, stored hashed. |
+| `OPENROUTER_API_KEY` | empty | API key for summary/tag enrichment. |
+| `OPENROUTER_MODEL` | `openrouter/auto` | Model used for enrichment. |
+| `COOKIE_SECURE` | `auto` | Session cookie Secure flag: `auto`, `true`, or `false`. |
+| `CAPTURE_USER_AGENT` | empty | Optional Browsertrix user-agent override. |
+| `CAPTURE_HEADLESS` | `false` | Browsertrix browser mode default. `false` uses headed mode under Xvfb. |
+| `CAPTURE_PAGE_DELAY` | `3` | Seconds Browsertrix waits between pages. |
+| `CAPTURE_PAGE_RETRIES` | `0` | Browsertrix page retry count. |
+| `CAPTURE_USE_SITEMAP` | `true` | Enables sitemap discovery for broad uncapped crawls. |
+| `BROWSERTRIX_QUEUE_DIR` | `/data/browsertrix/jobs` | Sidecar job queue directory. |
+| `BROWSERTRIX_RUNS_DIR` | `/data/browsertrix/runs` | Browsertrix output directory. |
+| `BROWSERTRIX_POLL_INTERVAL` | `1` | Sidecar queue polling interval in seconds. |
+| `BROWSERTRIX_CANCEL_GRACE_SECONDS` | `30` | Grace period before a canceled Browsertrix process is terminated. |
+
+Compose exposes `warcdriver` on port `8808`, runs both main containers with `PUID:PGID`, and initializes `./data` ownership before startup.
+
+## Data Layout
+
+`DATA_DIR` contains:
+
+- `warcdriver.sqlite3`
+- `browsertrix/jobs/*`
+- `browsertrix/runs/collections/*/*.wacz`
+- `markdown/<capture-id>/*.md`
+- `filters/*`
+
+## Development
+
+Frontend:
+
+```bash
+cd frontend
+nvm use
+npm install
+npm run build
+```
+
+Backend:
+
+```bash
+cd app
+go test ./...
+go build ./...
+```
+
+Regenerate API bindings after editing `openapi.yaml`:
+
+```bash
+cd app
+go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 \
+  -config oapi-codegen.yaml ../openapi.yaml
+```
+
+For local non-Docker builds, copy `frontend/dist` to `app/frontend/dist` before `go test` or `go build`.

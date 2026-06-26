@@ -1,26 +1,63 @@
-version: "3.8"
 services:
-  chrome:
-    container_name: chrome
-    image: gcr.io/zenika-hub/alpine-chrome:124
-    restart: unless-stopped
+  data-init:
+    container_name: warcdriver-data-init
+    image: alpine:3.22
+    restart: "no"
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./data:/data
     command:
-      - --no-sandbox
-      - --disable-gpu
-      - --disable-dev-shm-usage
-      - --remote-debugging-address=0.0.0.0
-      - --remote-debugging-port=9222
-      - --hide-scrollbars
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        mkdir -p /data/browsertrix/jobs /data/browsertrix/runs /data/filters /data/markdown
+        chown -R "$$PUID:$$PGID" /data
+  browsertrix-worker:
+    container_name: browsertrix-worker
+    build:
+      context: .
+      dockerfile: docker/browsertrix-worker/Dockerfile
+    user: "${PUID:-1000}:${PGID:-1000}"
+    restart: unless-stopped
+    environment:
+      BROWSERTRIX_QUEUE_DIR: /data/browsertrix/jobs
+      BROWSERTRIX_RUNS_DIR: /data/browsertrix/runs
+      BROWSERTRIX_POLL_INTERVAL: "1"
+      BROWSERTRIX_CANCEL_GRACE_SECONDS: "30"
+    volumes:
+      - ./data:/data
+    shm_size: "2gb"
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
   warcdriver:
     container_name: warcdriver
     build:
       context: .
       dockerfile: Dockerfile
+    user: "${PUID:-1000}:${PGID:-1000}"
     restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      WARC_ADMIN_USERNAME: ${WARC_ADMIN_USERNAME:-}
+      WARC_ADMIN_EMAIL: ${WARC_ADMIN_EMAIL:-}
+      WARC_ADMIN_NAME: ${WARC_ADMIN_NAME:-}
+      WARC_ADMIN_PASSWORD: ${WARC_ADMIN_PASSWORD:-}
+      WARC_API_TOKEN: ${WARC_API_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      CAPTURE_USER_AGENT: ${CAPTURE_USER_AGENT:-}
     volumes:
       - ./data:/data
     depends_on:
-      - chrome
+      data-init:
+        condition: service_completed_successfully
+      browsertrix-worker:
+        condition: service_started
     networks:
       - default
     expose:

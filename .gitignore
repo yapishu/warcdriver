@@ -1,2 +1,9 @@
 data/
 *.warc.gz
+app/warcdrive
+frontend/node_modules/
+frontend/dist/
+frontend/public/replay/
+*.swp
+.envrc
+app/frontend/dist/
