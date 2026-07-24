@@ -51,6 +51,7 @@ func (a *App) Routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	root.Get("/api/warcs/sw.js", serveReplayWorker)
+	root.Get("/api/warcs/ui.js", serveReplayUI)
 	root.Get("/app-sw.js", serveAppWorker)
 	root.Head("/app-sw.js", serveAppWorker)
 	root.Get("/manifest.webmanifest", serveManifest)
@@ -951,7 +952,7 @@ func (a *App) currentSettings(ctx context.Context) (api.Settings, error) {
 	headlessRaw, _ := a.store.GetSetting(ctx, "capture_headless")
 	captureHeadless, _ := strconv.ParseBool(firstNonEmpty(headlessRaw, getenv("CAPTURE_HEADLESS", "false")))
 	capturePageDelay := a.captureSettingInt(ctx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
-	capturePageRetries := a.captureSettingInt(ctx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", 0, 0, 5)
+	capturePageRetries := a.captureSettingInt(ctx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", defaultCapturePageRetries, 0, 5)
 	captureUseSitemap := a.captureSettingBool(ctx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
 	openRouterKey, _ := a.openRouterAPIKey(ctx)
 	openRouterKeyConfigured := openRouterKey != ""

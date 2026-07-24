@@ -18,7 +18,7 @@
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "replaywebpage": "^2.3.7"
+    "replaywebpage": "^2.4.6"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

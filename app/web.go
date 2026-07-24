@@ -40,6 +40,16 @@ func serveReplayWorker(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+func serveReplayUI(w http.ResponseWriter, r *http.Request) {
+	b, err := fs.ReadFile(webAssets, "replay/ui.js")
+	if err != nil {
+		http.Error(w, "replay UI unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write(b)
+}
+
 func serveAppWorker(w http.ResponseWriter, r *http.Request) {
 	b, err := fs.ReadFile(webAssets, "app-sw.js")
 	if err != nil {

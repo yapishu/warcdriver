@@ -92,6 +92,55 @@ func TestNormalizeArchiveJobRejectsBadPathExcludeRegex(t *testing.T) {
 	}
 }
 
+func TestReplayUIAssetIsAvailableWithoutAuthentication(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/warcs/ui.js", nil)
+	rec := httptest.NewRecorder()
+
+	(&App{}).Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/javascript; charset=utf-8" {
+		t.Fatalf("content type = %q", got)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("expected embedded replay UI JavaScript")
+	}
+}
+
+func TestCapturePageRetriesDefaultMigration(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, "capture_page_retries_default_v2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSetting(ctx, "capture_page_retries", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateCapturePageRetriesDefault(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetSetting(ctx, "capture_page_retries"); err != nil || got != "3" {
+		t.Fatalf("capture_page_retries = %q, err = %v; want 3", got, err)
+	}
+
+	if err := store.SetSetting(ctx, "capture_page_retries", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateCapturePageRetriesDefault(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetSetting(ctx, "capture_page_retries"); err != nil || got != "0" {
+		t.Fatalf("explicit post-migration retry setting = %q, err = %v; want 0", got, err)
+	}
+}
+
 func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

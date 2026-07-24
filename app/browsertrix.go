@@ -184,6 +184,7 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 	if opts.Scope == "single_page" || opts.Scope == "explicit_urls" {
 		depth = 0
 	}
+	pageRetries := browsertrixMaxPageRetries(opts)
 
 	config := map[string]any{
 		"seeds":               seeds,
@@ -202,9 +203,9 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 		"netIdleWait":         2,
 		"postLoadDelay":       1,
 		"pageExtraDelay":      browsertrixPageExtraDelay(opts),
-		"maxPageRetries":      browsertrixMaxPageRetries(opts),
-		"failOnFailedSeed":    true,
-		"failOnInvalidStatus": false,
+		"maxPageRetries":      pageRetries,
+		"failOnFailedSeed":    pageRetries == 0,
+		"failOnInvalidStatus": pageRetries > 0,
 		"behaviors":           []string{"autoplay", "autofetch", "autoscroll", "siteSpecific"},
 		"customBehaviors":     []string{browsertrixFontBehaviorPath},
 		"blockAds":            opts.BlockAds,

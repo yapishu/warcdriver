@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -638,7 +639,7 @@ func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 		"user_agent":           getenv("CAPTURE_USER_AGENT", ""),
 		"capture_headless":     getenv("CAPTURE_HEADLESS", "false"),
 		"capture_page_delay":   getenv("CAPTURE_PAGE_DELAY", "3"),
-		"capture_page_retries": getenv("CAPTURE_PAGE_RETRIES", "0"),
+		"capture_page_retries": getenv("CAPTURE_PAGE_RETRIES", strconv.Itoa(defaultCapturePageRetries)),
 		"capture_use_sitemap":  getenv("CAPTURE_USE_SITEMAP", "true"),
 	}
 	for k, v := range defaults {
@@ -646,7 +647,33 @@ func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.migrateCapturePageRetriesDefault(ctx)
+}
+
+func (s *Store) migrateCapturePageRetriesDefault(ctx context.Context) error {
+	const migrationKey = "capture_page_retries_default_v2"
+	var applied string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, migrationKey).Scan(&applied)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ? AND value = ?`,
+		strconv.Itoa(defaultCapturePageRetries), "capture_page_retries", "0"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?)`, migrationKey, "true"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UserCount(ctx context.Context) (int, error) {

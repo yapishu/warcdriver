@@ -230,19 +230,41 @@ func TestBrowsertrixConfigHonorsHeadlessSetting(t *testing.T) {
 	}
 }
 
+func TestBrowsertrixConfigRetriesInvalidStatuses(t *testing.T) {
+	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
+		JobID:       "retry-invalid-status",
+		StartURL:    "https://example.com/",
+		Scope:       "same_subdomain",
+		Depth:       -1,
+		PageRetries: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["failOnInvalidStatus"] != true {
+		t.Fatalf("failOnInvalidStatus = %v, want true when retries are enabled", cfg["failOnInvalidStatus"])
+	}
+	if cfg["failOnFailedSeed"] != false {
+		t.Fatalf("failOnFailedSeed = %v, want false so WARCdriver can back off and retry HTTP 429 seeds", cfg["failOnFailedSeed"])
+	}
+	if cfg["maxPageRetries"] != 3 {
+		t.Fatalf("maxPageRetries = %v, want 3", cfg["maxPageRetries"])
+	}
+}
+
 func TestBrowsertrixConfigPathExcludeRegex(t *testing.T) {
 	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
 		JobID:         "path-exclude",
 		StartURL:      "https://example.com/",
 		Scope:         "same_subdomain",
 		Depth:         -1,
-		PathExcludeRx: `/comment(?:[/?#]|$)`,
+		PathExcludeRx: `^/p/[^/]+/comments?(?:/|$)`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	exclude, ok := cfg["scopeExcludeRx"].(string)
-	if !ok || !strings.Contains(exclude, `/comment`) {
+	if !ok || !strings.Contains(exclude, `/comments?`) {
 		t.Fatalf("scopeExcludeRx does not include translated path filter: %v", cfg["scopeExcludeRx"])
 	}
 	rx, err := regexp.Compile(exclude)
@@ -251,6 +273,9 @@ func TestBrowsertrixConfigPathExcludeRegex(t *testing.T) {
 	}
 	if !rx.MatchString("https://example.com/p/post/comment/228026416") {
 		t.Fatalf("scopeExcludeRx should match comment route: %s", exclude)
+	}
+	if !rx.MatchString("https://example.com/p/post/comments") {
+		t.Fatalf("scopeExcludeRx should match comments index: %s", exclude)
 	}
 	if rx.MatchString("https://example.com/p/post") {
 		t.Fatalf("scopeExcludeRx should not match article route: %s", exclude)

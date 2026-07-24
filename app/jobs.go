@@ -18,11 +18,11 @@ import (
 	"time"
 )
 
-var rateLimitRetryDelays = []time.Duration{
-	30 * time.Second,
-	2 * time.Minute,
-	5 * time.Minute,
-}
+const (
+	defaultCapturePageRetries = 3
+	rateLimitRetryBaseDelay   = 30 * time.Second
+	rateLimitRetryMaxDelay    = 5 * time.Minute
+)
 
 func (a *App) StartWorkers(ctx context.Context, n int) {
 	if err := a.store.RequeueRunningJobs(ctx); err != nil {
@@ -141,7 +141,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		jobLog("info", "capture browser mode: headed Brave via Xvfb")
 	}
 	pageDelay := a.captureSettingInt(jobCtx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
-	pageRetries := a.captureSettingInt(jobCtx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", 0, 0, 5)
+	pageRetries := a.captureSettingInt(jobCtx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", defaultCapturePageRetries, 0, 5)
 	useSitemap := a.captureSettingBool(jobCtx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
 	jobLog("info", fmt.Sprintf("capture pacing: %ds page delay, %d page retries", pageDelay, pageRetries))
 
@@ -284,6 +284,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 }
 
 func (a *App) captureWithRateLimitBackoff(ctx context.Context, opts BrowsertrixCaptureOptions, jobLog func(level, msg string)) (*CaptureResult, error) {
+	maxRetries := browsertrixMaxPageRetries(opts)
 	for attempt := 0; ; attempt++ {
 		result, err := a.captureArchiveWithBrowsertrix(ctx, opts)
 		if err != nil {
@@ -295,10 +296,10 @@ func (a *App) captureWithRateLimitBackoff(ctx context.Context, opts BrowsertrixC
 		}
 		if reason := capturedPageRateLimitReason(result.Pages[0]); reason != "" {
 			a.discardBrowsertrixRun(opts.JobID, jobLog)
-			if attempt >= len(rateLimitRetryDelays) {
+			if attempt >= maxRetries {
 				return nil, fmt.Errorf("%s after %d attempts", reason, attempt+1)
 			}
-			delay := rateLimitRetryDelays[attempt]
+			delay := rateLimitRetryDelay(attempt)
 			message := fmt.Sprintf("%s; retrying in %s", reason, delay.Round(time.Second))
 			jobLog("warn", message)
 			_ = a.store.UpdateJobMessage(context.Background(), opts.JobID, message)
@@ -309,6 +310,20 @@ func (a *App) captureWithRateLimitBackoff(ctx context.Context, opts BrowsertrixC
 		}
 		return result, nil
 	}
+}
+
+func rateLimitRetryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := rateLimitRetryBaseDelay
+	for i := 0; i < attempt && delay < rateLimitRetryMaxDelay; i++ {
+		delay *= 2
+	}
+	if delay > rateLimitRetryMaxDelay {
+		return rateLimitRetryMaxDelay
+	}
+	return delay
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {

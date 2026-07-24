@@ -646,7 +646,7 @@ components:
           format: uri
         pathExcludeRx:
           type: string
-          description: Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery.
+          description: Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery. For Substack comment routes, use ^/p/[^/]+/comments?(?:/|$).
         cookieProfileId:
           type: string
         visibility:
@@ -835,6 +835,8 @@ components:
           type: integer
           minimum: 0
           maximum: 5
+          default: 3
+          description: Retry count for failed page loads, including HTTP 429 responses. Seed-page 429 retries use bounded exponential backoff.
         captureUseSitemap:
           type: boolean
     UpdateSettingsRequest:
@@ -862,6 +864,7 @@ components:
           type: integer
           minimum: 0
           maximum: 5
+          description: Retry count for failed page loads, including HTTP 429 responses. Set to 0 to disable retries.
         captureUseSitemap:
           type: boolean
     CookieProfileSourceType:

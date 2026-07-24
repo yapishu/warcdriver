@@ -797,9 +797,9 @@ function CaptureDock() {
             <input
               name="pathExcludeRx"
               type="text"
-              placeholder="exclude paths, e.g. ^/p/[^/]+/comment(?:/|$)"
+              placeholder="Substack comments: ^/p/[^/]+/comments?(?:/|$)"
               spellCheck={false}
-              title="Reject candidate page URLs whose path matches this regex after scope matching."
+              title="Reject candidate page URLs whose path matches this regex after scope matching. comments? matches both /comment/<id> and /comments."
             />
           </label>
           <label className="check-field">
@@ -1646,7 +1646,14 @@ function SettingsForm({ settings, onSaved }: { settings: SettingsType; onSaved: 
           </label>
           <label>
             Page retries
-            <input name="capturePageRetries" type="number" min="0" max="5" defaultValue={settings.capturePageRetries} />
+            <input
+              name="capturePageRetries"
+              type="number"
+              min="0"
+              max="5"
+              defaultValue={settings.capturePageRetries}
+              title="Retry failed page loads, including HTTP 429 responses. Seed-page 429 retries use exponential backoff."
+            />
           </label>
         </div>
         {message && <div className="callout">{message}</div>}
