@@ -1,6 +1,6 @@
 class WARCdriverFontLoader {
   static id = "WARCdriver Remote Font Loader";
-  static runInIframe = true;
+  static runInIframe = false;
 
   static init() {
     return {};

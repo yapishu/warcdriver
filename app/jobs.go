@@ -223,6 +223,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	}
 
 	indexed := 0
+	var rateLimitedURLs []string
 	for _, page := range result.Pages {
 		if jobCtx.Err() != nil {
 			jobLog("warn", "capture canceled during indexing")
@@ -231,6 +232,9 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		}
 		if reason := capturedPageFailureReason(page); reason != "" {
 			jobLog("warn", fmt.Sprintf("skip captured page %s: %s", page.URL, reason))
+			if capturedPageRateLimitReason(page) != "" {
+				rateLimitedURLs = append(rateLimitedURLs, page.URL)
+			}
 			continue
 		}
 		item, err := a.store.CreateItem(jobCtx, ItemRecord{
@@ -280,7 +284,41 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	if err := a.store.FinishJob(context.Background(), job.ID, capture.ID); err != nil {
 		log.Printf("finish job %s: %v", job.ID, err)
 	}
+	if pageRetries > 0 && len(rateLimitedURLs) > 0 {
+		a.queueRateLimitedPageRetries(context.Background(), job, rateLimitedURLs, jobLog)
+	}
 	jobLog("info", fmt.Sprintf("job complete: captured %d pages", indexed))
+}
+
+func (a *App) queueRateLimitedPageRetries(ctx context.Context, parent *ArchiveJobRecord, urls []string, jobLog func(level, msg string)) {
+	seen := make(map[string]bool, len(urls))
+	queued := 0
+	for _, rawURL := range urls {
+		rawURL = strings.TrimSpace(rawURL)
+		normalized := normalizeURL(rawURL)
+		if rawURL == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		retryJob, err := a.store.CreateArchiveJob(ctx, nullString(parent.UserID), ArchiveJobCreate{
+			URL:             rawURL,
+			Scope:           "single_page",
+			Depth:           0,
+			MaxPages:        1,
+			CookieProfileID: nullString(parent.CookieProfileID),
+			Visibility:      parent.Visibility,
+			Enrich:          parent.Enrich,
+		})
+		if err != nil {
+			jobLog("error", fmt.Sprintf("failed to queue rate-limit retry for %s: %v", rawURL, err))
+			continue
+		}
+		_ = a.store.AddJobLog(ctx, retryJob.ID, "info", fmt.Sprintf("job queued to retry rate-limited page from job %s", parent.ID))
+		queued++
+	}
+	if queued > 0 {
+		jobLog("info", fmt.Sprintf("queued %d rate-limited pages as isolated retry jobs with exponential backoff", queued))
+	}
 }
 
 func (a *App) captureWithRateLimitBackoff(ctx context.Context, opts BrowsertrixCaptureOptions, jobLog func(level, msg string)) (*CaptureResult, error) {

@@ -227,3 +227,57 @@ func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 		t.Fatalf("visibility/enrich = %s/%v, want public/false", queued.Visibility, queued.Enrich)
 	}
 }
+
+func TestQueueRateLimitedPageRetriesCreatesDeduplicatedSinglePageJobs(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := OpenStore(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	user, err := store.CreateUser(ctx, UserCreate{
+		Username:     "retry-owner",
+		DisplayName:  "Retry Owner",
+		PasswordHash: "hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.CreateArchiveJob(ctx, user.ID, ArchiveJobCreate{
+		URL:        "https://publication.substack.com/",
+		Scope:      "same_subdomain",
+		Depth:      -1,
+		Visibility: VisibilityPrivate,
+		Enrich:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{store: store, dataDir: dataDir}
+	app.queueRateLimitedPageRetries(ctx, parent, []string{
+		"https://publication.substack.com/p/one",
+		"https://publication.substack.com/p/one",
+		"https://publication.substack.com/p/two",
+	}, func(string, string) {})
+
+	jobs, err := store.ListArchiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 3 {
+		t.Fatalf("jobs = %d, want parent plus 2 retries", len(jobs))
+	}
+	for _, job := range jobs {
+		if job.ID == parent.ID {
+			continue
+		}
+		if job.Scope != "single_page" || job.Depth != 0 || job.MaxPages != 1 {
+			t.Fatalf("retry job scope/depth/maxPages = %s/%d/%d", job.Scope, job.Depth, job.MaxPages)
+		}
+		if !job.UserID.Valid || job.UserID.String != user.ID || job.Visibility != VisibilityPrivate || !job.Enrich {
+			t.Fatalf("retry job did not preserve ownership/options: %+v", job)
+		}
+	}
+}

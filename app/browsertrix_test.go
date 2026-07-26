@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -181,7 +182,7 @@ func TestParseBrowsertrixLogLineFailedRequest(t *testing.T) {
 	}
 }
 
-func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
+func TestBrowsertrixConfigLinkedPagesStaysOnHost(t *testing.T) {
 	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
 		JobID:    "linked-pages",
 		StartURL: "https://example.com/",
@@ -192,8 +193,8 @@ func TestBrowsertrixConfigLinkedPagesUsesAnyScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg["scopeType"] != "any" || cfg["depth"] != 2 {
-		t.Fatalf("scopeType/depth = %v/%v, want any/2", cfg["scopeType"], cfg["depth"])
+	if cfg["scopeType"] != "host" || cfg["depth"] != 2 {
+		t.Fatalf("scopeType/depth = %v/%v, want host/2", cfg["scopeType"], cfg["depth"])
 	}
 	if cfg["headless"] != false {
 		t.Fatalf("headless = %v, want false by default", cfg["headless"])
@@ -230,7 +231,7 @@ func TestBrowsertrixConfigHonorsHeadlessSetting(t *testing.T) {
 	}
 }
 
-func TestBrowsertrixConfigRetriesInvalidStatuses(t *testing.T) {
+func TestBrowsertrixConfigDoesNotImmediatelyRetryHTTPFailures(t *testing.T) {
 	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
 		JobID:       "retry-invalid-status",
 		StartURL:    "https://example.com/",
@@ -241,14 +242,14 @@ func TestBrowsertrixConfigRetriesInvalidStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg["failOnInvalidStatus"] != true {
-		t.Fatalf("failOnInvalidStatus = %v, want true when retries are enabled", cfg["failOnInvalidStatus"])
+	if cfg["failOnInvalidStatus"] != false {
+		t.Fatalf("failOnInvalidStatus = %v, want false so HTTP failures can be inspected and 429s retried with backoff", cfg["failOnInvalidStatus"])
 	}
 	if cfg["failOnFailedSeed"] != false {
 		t.Fatalf("failOnFailedSeed = %v, want false so WARCdriver can back off and retry HTTP 429 seeds", cfg["failOnFailedSeed"])
 	}
 	if cfg["maxPageRetries"] != 3 {
-		t.Fatalf("maxPageRetries = %v, want 3", cfg["maxPageRetries"])
+		t.Fatalf("maxPageRetries = %v, want 3 for browser load failures", cfg["maxPageRetries"])
 	}
 }
 
@@ -282,6 +283,35 @@ func TestBrowsertrixConfigPathExcludeRegex(t *testing.T) {
 	}
 	if rx.MatchString("https://cdn.example.com/app.css") {
 		t.Fatalf("scopeExcludeRx should not block stylesheet subresources: %s", exclude)
+	}
+}
+
+func TestBrowsertrixConfigDefaultsSubstackCommentExclusion(t *testing.T) {
+	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
+		JobID:    "substack-defaults",
+		StartURL: "https://publication.substack.com/p/post",
+		Scope:    "linked_pages",
+		Depth:    2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exclude, ok := cfg["scopeExcludeRx"].(string)
+	if !ok {
+		t.Fatalf("scopeExcludeRx = %v, want Substack comments exclusion", cfg["scopeExcludeRx"])
+	}
+	rx := regexp.MustCompile(exclude)
+	for _, rawURL := range []string{
+		"https://publication.substack.com/p/post/comments",
+		"https://publication.substack.com/p/post/comment/123",
+	} {
+		if !rx.MatchString(rawURL) {
+			t.Fatalf("scopeExcludeRx %q should match %s", exclude, rawURL)
+		}
+	}
+	behaviors, ok := cfg["behaviors"].([]string)
+	if !ok || slices.Contains(behaviors, "siteSpecific") {
+		t.Fatalf("Substack behaviors should omit siteSpecific comment loading: %v", cfg["behaviors"])
 	}
 }
 

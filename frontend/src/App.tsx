@@ -608,9 +608,12 @@ function Frame({
 }
 
 function CaptureDock() {
+  const substackCommentExcludeRx = "^/p/[^/]+/comments?(?:/|$)";
   const [profiles, setProfiles] = useState<CookieProfile[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [url, setURL] = useState("");
+  const [pathExcludeRx, setPathExcludeRx] = useState("");
   const [scope, setScope] = useState<ArchiveScope>("single_page");
   const [depth, setDepth] = useState(0);
   const [unlimitedPages, setUnlimitedPages] = useState(false);
@@ -642,15 +645,17 @@ function CaptureDock() {
       enrich: form.get("enrich") === "on"
     };
     const prefix = String(form.get("prefix") || "").trim();
-    const pathExcludeRx = String(form.get("pathExcludeRx") || "").trim();
+    const submittedPathExcludeRx = String(form.get("pathExcludeRx") || "").trim();
     const cookieProfileId = String(form.get("cookieProfileId") || "").trim();
     if (prefix) payload.prefix = prefix;
-    if (pathExcludeRx) payload.pathExcludeRx = pathExcludeRx;
+    if (submittedPathExcludeRx) payload.pathExcludeRx = submittedPathExcludeRx;
     if (cookieProfileId) payload.cookieProfileId = cookieProfileId;
     try {
       const job = await api.createJob(payload);
       window.location.hash = `/jobs/${job.id}`;
       formEl.reset();
+      setURL("");
+      setPathExcludeRx("");
       setScope("single_page");
       setDepth(0);
       setUnlimitedPages(false);
@@ -703,13 +708,27 @@ function CaptureDock() {
     }
   }
 
+  function updateURL(next: string) {
+    setURL(next);
+    if (!pathExcludeRx && /^https?:\/\/(?:[^./]+\.)?substack\.com(?:[/:?#]|$)/i.test(next.trim())) {
+      setPathExcludeRx(substackCommentExcludeRx);
+    }
+  }
+
   return (
     <header className="capture-dock">
       <form onSubmit={submit} className="capture-form">
         <div className="capture-main-row">
           <label className="url-field">
             URL
-            <input name="url" type="url" placeholder="https://publication.substack.com/p/article" required />
+            <input
+              name="url"
+              type="url"
+              value={url}
+              onChange={(event) => updateURL(event.target.value)}
+              placeholder="https://publication.substack.com/p/article"
+              required
+            />
           </label>
           <button className="primary-button capture-button" disabled={busy}>
             {busy ? <Loader2 className="spin" size={16} /> : <Archive size={16} />}
@@ -797,7 +816,9 @@ function CaptureDock() {
             <input
               name="pathExcludeRx"
               type="text"
-              placeholder="Substack comments: ^/p/[^/]+/comments?(?:/|$)"
+              value={pathExcludeRx}
+              onChange={(event) => setPathExcludeRx(event.target.value)}
+              placeholder="e.g. ^/p/[^/]+/comments?(?:/|$)"
               spellCheck={false}
               title="Reject candidate page URLs whose path matches this regex after scope matching. comments? matches both /comment/<id> and /comments."
             />
@@ -1652,7 +1673,7 @@ function SettingsForm({ settings, onSaved }: { settings: SettingsType; onSaved: 
               min="0"
               max="5"
               defaultValue={settings.capturePageRetries}
-              title="Retry failed page loads, including HTTP 429 responses. Seed-page 429 retries use exponential backoff."
+              title="Retry browser load failures and HTTP 429 responses. Rate-limited pages use exponential backoff starting at 30 seconds."
             />
           </label>
         </div>

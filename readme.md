@@ -19,10 +19,10 @@ Open `http://localhost:8808/` and log in with the bootstrap admin account.
 The capture form creates Browsertrix jobs. Useful fields:
 
 - `URL`: seed URL.
-- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
+- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Linked-page and subdomain scopes stay on the seed hostname; prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
 - `Depth`: link traversal depth. Broad scopes use `All`.
 - `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
-- `Path exclude regex`: a regular expression matched against candidate URL paths after scope matching, before pages are queued. For Substack, use `^/p/[^/]+/comments?(?:/|$)` to reject both `/comments` indexes and `/comment/<id>` permalinks. Another example is `^/(login|cart)(?:/|$)`.
+- `Path exclude regex`: a regular expression matched against candidate URL paths after scope matching, before pages are queued. Substack URLs automatically use `^/p/[^/]+/comments?(?:/|$)` to reject both `/comments` indexes and `/comment/<id>` permalinks. Another example is `^/(login|cart)(?:/|$)`.
 - `Cookies`: optional saved cookie profile.
 - `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
 - `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
@@ -87,7 +87,7 @@ Admin users can manage accounts at `/api/users` and from the Users screen. There
 | `CAPTURE_USER_AGENT` | empty | Optional Browsertrix user-agent override. |
 | `CAPTURE_HEADLESS` | `false` | Browsertrix browser mode default. `false` uses headed mode under Xvfb. |
 | `CAPTURE_PAGE_DELAY` | `3` | Seconds Browsertrix waits between pages. |
-| `CAPTURE_PAGE_RETRIES` | `3` | Retry count for failed pages, including HTTP 429 responses. Seed-page 429 retries use exponential backoff starting at 30 seconds. |
+| `CAPTURE_PAGE_RETRIES` | `3` | Retry count for browser load failures and HTTP 429 responses. Rate-limited pages are retried in isolated jobs with exponential backoff starting at 30 seconds. |
 | `CAPTURE_USE_SITEMAP` | `true` | Enables sitemap discovery for broad uncapped crawls. |
 | `BROWSERTRIX_QUEUE_DIR` | `/data/browsertrix/jobs` | Sidecar job queue directory. |
 | `BROWSERTRIX_RUNS_DIR` | `/data/browsertrix/runs` | Browsertrix output directory. |

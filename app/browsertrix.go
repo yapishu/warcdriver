@@ -22,6 +22,7 @@ const (
 	browsertrixFontBehaviorPath   = "/app/warcdriver-behaviors"
 	browsertrixFontBehaviorMaxMS  = 8_000
 	browsertrixFontBehaviorScroll = 30
+	substackCommentExcludeRx      = `^/p/[^/]+/comments?(?:/|$)`
 )
 
 type BrowsertrixCaptureOptions struct {
@@ -204,9 +205,9 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 		"postLoadDelay":       1,
 		"pageExtraDelay":      browsertrixPageExtraDelay(opts),
 		"maxPageRetries":      pageRetries,
-		"failOnFailedSeed":    pageRetries == 0,
-		"failOnInvalidStatus": pageRetries > 0,
-		"behaviors":           []string{"autoplay", "autofetch", "autoscroll", "siteSpecific"},
+		"failOnFailedSeed":    false,
+		"failOnInvalidStatus": false,
+		"behaviors":           browsertrixBehaviors(opts),
 		"customBehaviors":     []string{browsertrixFontBehaviorPath},
 		"blockAds":            opts.BlockAds,
 		"saveState":           "partial",
@@ -294,7 +295,7 @@ func browsertrixScope(opts BrowsertrixCaptureOptions) (scopeType, include string
 	case "same_subdomain":
 		return "host", ""
 	case "linked_pages":
-		return "any", ""
+		return "host", ""
 	case "prefix":
 		if strings.TrimSpace(opts.Prefix) != "" {
 			return "custom", "^" + regexp.QuoteMeta(strings.TrimSpace(opts.Prefix))
@@ -308,7 +309,24 @@ func browsertrixScope(opts BrowsertrixCaptureOptions) (scopeType, include string
 }
 
 func browsertrixScopeExcludeRx(opts BrowsertrixCaptureOptions) string {
-	return browsertrixPathExcludeRx(opts.PathExcludeRx)
+	pathRx := strings.TrimSpace(opts.PathExcludeRx)
+	if pathRx == "" && isSubstackURL(opts.StartURL) {
+		pathRx = substackCommentExcludeRx
+	}
+	return browsertrixPathExcludeRx(pathRx)
+}
+
+func browsertrixBehaviors(opts BrowsertrixCaptureOptions) []string {
+	behaviors := []string{"autoplay", "autofetch", "autoscroll"}
+	if !isSubstackURL(opts.StartURL) {
+		behaviors = append(behaviors, "siteSpecific")
+	}
+	return behaviors
+}
+
+func isSubstackURL(rawURL string) bool {
+	host := strings.ToLower(hostFromURL(rawURL))
+	return host == "substack.com" || strings.HasSuffix(host, ".substack.com")
 }
 
 func browsertrixPathExcludeRx(pathRx string) string {
