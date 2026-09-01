@@ -1138,7 +1138,9 @@ function SitePage({ id }: { id: string }) {
   const [updateMessage, setUpdateMessage] = useState("");
   const load = useLoader(
     () => api.siteIndex(id, { status, q: query, limit: pageSize, offset: page * pageSize }),
-    [id, query, status, page, pageSize, refresh]
+    [id, query, status, page, pageSize, refresh],
+    undefined,
+    true
   );
   async function deleteSite() {
     await api.deleteSite(id);
@@ -1950,7 +1952,7 @@ function CookieProfiles({ profiles, onChanged }: { profiles: CookieProfile[]; on
   );
 }
 
-function useLoader<T>(loader: () => Promise<T>, deps: unknown[], pollMs?: number): LoadState<T> {
+function useLoader<T>(loader: () => Promise<T>, deps: unknown[], pollMs?: number, keepPrevious = false): LoadState<T> {
   const [load, setLoad] = useState<LoadState<T>>({ state: "loading" });
   const stableLoader = useCallback(loader, deps);
 
@@ -1961,7 +1963,7 @@ function useLoader<T>(loader: () => Promise<T>, deps: unknown[], pollMs?: number
         .then((data) => alive && setLoad({ state: "ready", data }))
         .catch((err) => alive && setLoad({ state: "error", error: errorMessage(err) }));
     };
-    setLoad({ state: "loading" });
+    setLoad((current) => keepPrevious && current.state === "ready" ? current : { state: "loading" });
     run();
     if (!pollMs) return () => { alive = false; };
     const timer = window.setInterval(run, pollMs);
@@ -1969,7 +1971,7 @@ function useLoader<T>(loader: () => Promise<T>, deps: unknown[], pollMs?: number
       alive = false;
       window.clearInterval(timer);
     };
-  }, [stableLoader, pollMs]);
+  }, [stableLoader, pollMs, keepPrevious]);
 
   return load;
 }
