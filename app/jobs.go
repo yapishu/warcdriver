@@ -22,6 +22,7 @@ const (
 	defaultCapturePageRetries = 3
 	rateLimitRetryBaseDelay   = 30 * time.Second
 	rateLimitRetryMaxDelay    = 5 * time.Minute
+	substackMinPageDelay      = 60
 )
 
 func (a *App) StartWorkers(ctx context.Context, n int) {
@@ -160,8 +161,8 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		jobLog("info", "capture browser mode: headed Brave via Xvfb")
 	}
 	pageDelay := a.captureSettingInt(jobCtx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
-	if isSubstackMode && pageDelay < 5 {
-		pageDelay = 5
+	if isSubstackMode && pageDelay < substackMinPageDelay {
+		pageDelay = substackMinPageDelay
 	}
 	pageRetries := a.captureSettingInt(jobCtx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", defaultCapturePageRetries, 0, 5)
 	useSitemap := a.captureSettingBool(jobCtx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)

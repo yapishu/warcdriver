@@ -323,7 +323,13 @@ func browsertrixScopeExcludeRx(opts BrowsertrixCaptureOptions) string {
 }
 
 func browsertrixBehaviors(opts BrowsertrixCaptureOptions) []string {
-	behaviors := []string{"autoplay", "autofetch", "autoscroll"}
+	behaviors := []string{"autoplay", "autofetch"}
+	// The bounded WARCdriver font/asset behavior already scrolls the page to
+	// activate lazy resources. Browsertrix's generic autoscroll can wait for its
+	// full behavior timeout on otherwise complete Substack posts.
+	if !isSubstackURL(opts.StartURL) {
+		behaviors = append(behaviors, "autoscroll")
+	}
 	if !isSubstackURL(opts.StartURL) {
 		behaviors = append(behaviors, "siteSpecific")
 	}
