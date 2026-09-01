@@ -337,9 +337,10 @@ func browsertrixBehaviors(opts BrowsertrixCaptureOptions) []string {
 	if !isSubstackURL(opts.StartURL) {
 		behaviors = append(behaviors, "autoplay", "autoscroll")
 	}
-	if !isSubstackURL(opts.StartURL) {
-		behaviors = append(behaviors, "siteSpecific")
-	}
+	// Browsertrix only invokes an injected custom behavior when siteSpecific is
+	// enabled. Our injected behavior matches Substack only and performs the
+	// bounded post-body image/font pass; it does not click or load comments.
+	behaviors = append(behaviors, "siteSpecific")
 	return behaviors
 }
 

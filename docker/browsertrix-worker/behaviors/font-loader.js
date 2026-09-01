@@ -1,5 +1,5 @@
 class WARCdriverFontLoader {
-  static id = "WARCdriver Remote Font Loader";
+  static id = "WARCdriver Substack Asset Loader";
   static runInIframe = false;
 
   static init() {
@@ -7,7 +7,11 @@ class WARCdriverFontLoader {
   }
 
   static isMatch() {
-    return typeof document !== "undefined" && Boolean(document.fonts);
+    if (typeof document === "undefined" || typeof location === "undefined") {
+      return false;
+    }
+    const host = location.hostname.toLowerCase();
+    return Boolean(document.fonts) && (host === "substack.com" || host.endsWith(".substack.com"));
   }
 
   async* run(ctx) {
@@ -64,7 +68,11 @@ class WARCdriverFontLoader {
     };
 
     const bodyImageURLs = () => {
-      const article = document.querySelector("article, .body.markup, [data-testid='post-content'], .available-content") || document.body;
+      const article = document.querySelector(".body.markup") ||
+        document.querySelector("[data-testid='post-content']") ||
+        document.querySelector(".available-content") ||
+        document.querySelector("article") ||
+        document.body;
       const urls = new Set();
       const add = (raw) => {
         if (!raw) return;

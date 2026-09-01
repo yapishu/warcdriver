@@ -310,8 +310,8 @@ func TestBrowsertrixConfigDefaultsSubstackCommentExclusion(t *testing.T) {
 		}
 	}
 	behaviors, ok := cfg["behaviors"].([]string)
-	if !ok || slices.Contains(behaviors, "siteSpecific") {
-		t.Fatalf("Substack behaviors should omit siteSpecific comment loading: %v", cfg["behaviors"])
+	if !ok || !slices.Contains(behaviors, "siteSpecific") {
+		t.Fatalf("Substack behaviors should run the injected asset verifier: %v", cfg["behaviors"])
 	}
 	if slices.Contains(behaviors, "autoscroll") {
 		t.Fatalf("Substack behaviors should use the bounded asset scroll instead of generic autoscroll: %v", behaviors)
