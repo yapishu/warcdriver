@@ -55,6 +55,29 @@ func TestMissingCapturedURLs(t *testing.T) {
 	}
 }
 
+func TestNewSubstackPostURLsDiffsIndexedPosts(t *testing.T) {
+	discovered := []string{
+		"https://publication.substack.com/p/three",
+		"https://publication.substack.com/p/one?utm_source=sitemap",
+		"https://publication.substack.com/p/two",
+		"https://publication.substack.com/p/three",
+	}
+	items := []ItemRecord{
+		{URL: "https://publication.substack.com/p/one"},
+		{URL: "https://publication.substack.com/p/two"},
+	}
+	missing := newSubstackPostURLs(discovered, items)
+	if len(missing) != 1 || missing[0] != "https://publication.substack.com/p/three" {
+		t.Fatalf("missing = %#v", missing)
+	}
+	if !allSubstackPostURLs(missing) {
+		t.Fatal("expected incremental post list to be recognized as Substack posts")
+	}
+	if allSubstackPostURLs(nil) || allSubstackPostURLs([]string{"https://publication.substack.com/archive"}) {
+		t.Fatal("non-post or empty lists must not activate Substack incremental mode")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }

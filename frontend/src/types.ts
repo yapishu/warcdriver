@@ -65,6 +65,12 @@ export type SiteIndex = {
   visibility: Visibility;
 };
 
+export type SubstackUpdateResult = {
+  newPosts: number;
+  totalPosts: number;
+  job?: ArchiveJob;
+};
+
 export type Item = {
   id: string;
   siteId: string;

@@ -107,13 +107,15 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 
 	var explicit []string
 	_ = json.Unmarshal([]byte(job.URLsJSON), &explicit)
-	isSubstackMode := job.Scope == "substack"
+	isFullSubstackMode := job.Scope == "substack"
+	isSubstackUpdate := job.Scope == "explicit_urls" && isSubstackURL(job.URL) && allSubstackPostURLs(explicit)
+	isSubstackMode := isFullSubstackMode || isSubstackUpdate
 	validateSubstackImages := isSubstackMode || isSubstackPostURL(job.URL)
 	captureStartURL := job.URL
 	captureScope := job.Scope
 	captureDepth := job.Depth
 	captureMaxPages := job.MaxPages
-	if isSubstackMode {
+	if isFullSubstackMode {
 		var err error
 		explicit, err = discoverSubstackPosts(jobCtx, nil, job.URL)
 		if err != nil {
@@ -126,6 +128,12 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		captureDepth = 0
 		captureMaxPages = len(explicit) + 1
 		jobLog("info", fmt.Sprintf("Substack mode discovered %d posts from sitemap; capturing exact post URLs plus homepage metadata", len(explicit)))
+	} else if isSubstackUpdate {
+		captureStartURL, _ = substackHomepageURL(job.URL)
+		captureScope = "explicit_urls"
+		captureDepth = 0
+		captureMaxPages = len(explicit) + 1
+		jobLog("info", fmt.Sprintf("Substack update capturing %d new or previously missing posts plus homepage metadata", len(explicit)))
 	}
 
 	var browserCookies []browserCookieData
@@ -369,7 +377,9 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	if pageRetries > 0 && len(retryURLs) > 0 {
 		a.queuePageRetries(context.Background(), job, retryURLs, jobLog)
 	}
-	if isSubstackMode {
+	if isSubstackUpdate {
+		jobLog("info", fmt.Sprintf("Substack update complete: indexed %d/%d new posts; missing or failed posts were queued for isolated retry", indexed, len(explicit)))
+	} else if isSubstackMode {
 		jobLog("info", fmt.Sprintf("job complete: indexed %d/%d Substack posts; missing or failed posts were queued for isolated retry", indexed, len(explicit)))
 	} else {
 		jobLog("info", fmt.Sprintf("job complete: captured %d pages", indexed))

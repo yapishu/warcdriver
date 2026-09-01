@@ -9,6 +9,7 @@ import type {
   Settings,
   Site,
   SiteIndex,
+  SubstackUpdateResult,
   User,
   Visibility,
   WarcMetadata
@@ -110,6 +111,8 @@ export const api = {
     request<ArchiveJob>(`/api/sites/${id}/retry-page`, { method: "POST", body: { url } }),
   retryFailedSitePages: (id: string) =>
     request<{ queued: number; jobs: ArchiveJob[] }>(`/api/sites/${id}/retry-failed`, { method: "POST" }),
+  checkSiteForNewPosts: (id: string) =>
+    request<SubstackUpdateResult>(`/api/sites/${id}/check-new-posts`, { method: "POST" }),
   deleteSite: (id: string) => request<void>(`/api/sites/${id}`, { method: "DELETE" }),
   items: (params: { siteId?: string; q?: string; limit?: number } = {}) => {
     const query = new URLSearchParams();

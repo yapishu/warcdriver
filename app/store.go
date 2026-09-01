@@ -1094,6 +1094,17 @@ func (s *Store) GetArchiveJob(ctx context.Context, id string) (*ArchiveJobRecord
 	return scanArchiveJob(row)
 }
 
+func (s *Store) FindActiveArchiveJob(ctx context.Context, rawURL, scope string) (*ArchiveJobRecord, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM archive_jobs
+		WHERE url = ? AND scope = ? AND status IN (?, ?)
+		ORDER BY created_at DESC LIMIT 1`, rawURL, scope, StatusQueued, StatusRunning).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetArchiveJob(ctx, id)
+}
+
 func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
 			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, replace_item_id, created_at, started_at, finished_at

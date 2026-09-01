@@ -93,6 +93,50 @@ func isSubstackPostURL(rawURL string) bool {
 	return len(parts) == 2 && parts[0] == "p" && parts[1] != ""
 }
 
+func allSubstackPostURLs(urls []string) bool {
+	if len(urls) == 0 {
+		return false
+	}
+	for _, rawURL := range urls {
+		if !isSubstackPostURL(rawURL) {
+			return false
+		}
+	}
+	return true
+}
+
+func newSubstackPostURLs(discovered []string, items []ItemRecord) []string {
+	existing := make(map[string]bool, len(items)*2)
+	for _, item := range items {
+		existing[substackPostIdentity(item.URL)] = true
+		if item.CanonicalURL.Valid {
+			existing[substackPostIdentity(item.CanonicalURL.String)] = true
+		}
+	}
+	missing := make([]string, 0)
+	seen := make(map[string]bool, len(discovered))
+	for _, rawURL := range discovered {
+		normalized := substackPostIdentity(rawURL)
+		if normalized == "" || seen[normalized] || existing[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		missing = append(missing, rawURL)
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func substackPostIdentity(rawURL string) string {
+	parsed, err := parseURL(rawURL)
+	if err != nil {
+		return normalizeURL(rawURL)
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return normalizeURL(parsed.String())
+}
+
 func missingCapturedURLs(expected []string, pages []CapturedPage) []string {
 	captured := make(map[string]bool, len(pages))
 	for _, page := range pages {

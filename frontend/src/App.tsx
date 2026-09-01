@@ -1134,6 +1134,8 @@ function SitePage({ id }: { id: string }) {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
   const [refresh, setRefresh] = useState(0);
+  const [checkingNewPosts, setCheckingNewPosts] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
   const load = useLoader(
     () => api.siteIndex(id, { status, q: query, limit: pageSize, offset: page * pageSize }),
     [id, query, status, page, pageSize, refresh]
@@ -1149,6 +1151,22 @@ function SitePage({ id }: { id: string }) {
   async function retryAllFailed() {
     await api.retryFailedSitePages(id);
     setRefresh((value) => value + 1);
+  }
+  async function checkForNewPosts() {
+    setCheckingNewPosts(true);
+    setUpdateMessage("");
+    try {
+      const result = await api.checkSiteForNewPosts(id);
+      if (result.job) {
+        window.location.hash = `/jobs/${result.job.id}`;
+        return;
+      }
+      setUpdateMessage(`Up to date · ${result.totalPosts} sitemap posts`);
+    } catch (error) {
+      setUpdateMessage(error instanceof Error ? error.message : "Could not check the Substack sitemap");
+    } finally {
+      setCheckingNewPosts(false);
+    }
   }
   return (
     <Resource load={load}>
@@ -1196,6 +1214,13 @@ function SitePage({ id }: { id: string }) {
             title={canManage ? "Publication index" : "Archived posts"}
             action={
               <div className="action-row">
+                {canManage && (
+                  <button className="icon-button" type="button" disabled={checkingNewPosts} onClick={checkForNewPosts}>
+                    {checkingNewPosts ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                    {checkingNewPosts ? "Checking sitemap…" : "Check for new posts"}
+                  </button>
+                )}
+                {canManage && updateMessage && <span>{updateMessage}</span>}
                 {canManage && (
                   <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(0); }} aria-label="Capture status filter">
                     <option value="all">All statuses</option>

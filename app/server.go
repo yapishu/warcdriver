@@ -75,6 +75,7 @@ func (a *App) Routes() http.Handler {
 	apiRouter.Put("/api/sites/{id}/visibility", a.UpdateSiteVisibility)
 	apiRouter.Post("/api/sites/{id}/retry-failed", a.RetryFailedSitePages)
 	apiRouter.Post("/api/sites/{id}/retry-page", a.RetryFailedSitePage)
+	apiRouter.Post("/api/sites/{id}/check-new-posts", a.CheckSiteForNewSubstackPosts)
 	api.HandlerFromMux(a, apiRouter)
 	root.Mount("/", apiRouter)
 
@@ -791,6 +792,75 @@ func (a *App) RetryFailedSitePages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"queued": len(jobs), "jobs": jobs})
+}
+
+func (a *App) CheckSiteForNewSubstackPosts(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	user, _ := userFromContext(r.Context())
+	canManage, err := a.store.CanManageSite(r.Context(), id, user)
+	if err != nil || !canManage {
+		writeError(w, http.StatusForbidden, "site owner or admin required")
+		return
+	}
+	site, err := a.store.GetSite(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+	homepage := "https://" + site.Host + "/"
+	if _, err := substackHomepageURL(homepage); err != nil {
+		writeError(w, http.StatusBadRequest, "site is not a Substack publication")
+		return
+	}
+	if active, err := a.store.FindActiveArchiveJob(r.Context(), homepage, "explicit_urls"); err == nil {
+		var pending []string
+		_ = json.Unmarshal([]byte(active.URLsJSON), &pending)
+		writeJSON(w, http.StatusAccepted, map[string]any{"newPosts": len(pending), "totalPosts": len(pending), "job": apiArchiveJob(active)})
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	discovered, err := discoverSubstackPosts(r.Context(), nil, homepage)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	items, err := a.store.ListItemsForSite(r.Context(), id, 100000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	missing := newSubstackPostURLs(discovered, items)
+	if len(missing) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"newPosts": 0, "totalPosts": len(discovered)})
+		return
+	}
+	if len(items) == 0 {
+		writeError(w, http.StatusConflict, "site has no prior capture settings to reuse")
+		return
+	}
+	original, err := a.store.GetArchiveJob(r.Context(), items[0].JobID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	visibility, _ := a.store.SiteVisibility(r.Context(), id)
+	userID := ""
+	if user != nil {
+		userID = user.ID
+	}
+	job, err := a.store.CreateArchiveJob(r.Context(), userID, ArchiveJobCreate{
+		URL: homepage, URLs: missing, Scope: "explicit_urls", Depth: 0, MaxPages: len(missing) + 1,
+		PathExcludeRx: substackCommentExcludeRx, CookieProfileID: nullString(original.CookieProfileID),
+		Visibility: visibility, Enrich: original.Enrich,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = a.store.AddJobLog(r.Context(), job.ID, "info", fmt.Sprintf("queued after sitemap diff found %d new or missing posts out of %d", len(missing), len(discovered)))
+	writeJSON(w, http.StatusAccepted, map[string]any{"newPosts": len(missing), "totalPosts": len(discovered), "job": apiArchiveJob(job)})
 }
 
 func (a *App) ListItems(w http.ResponseWriter, r *http.Request, params api.ListItemsParams) {
