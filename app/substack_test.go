@@ -78,6 +78,31 @@ func TestNewSubstackPostURLsDiffsIndexedPosts(t *testing.T) {
 	}
 }
 
+func TestClassifyFailedSubstackImagesSeparatesBrokenSources(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/empty":
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Length", "0")
+		case "/missing":
+			http.NotFound(w, r)
+		default:
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Length", "42")
+		}
+	}))
+	defer server.Close()
+
+	broken, unresolved := classifyFailedSubstackImages(context.Background(), 4, []string{
+		server.URL + "/empty",
+		server.URL + "/missing",
+		server.URL + "/reachable",
+	})
+	if broken != 2 || unresolved != 2 {
+		t.Fatalf("broken/unresolved = %d/%d, want 2/2", broken, unresolved)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }

@@ -67,24 +67,50 @@ class WARCdriverFontLoader {
       }
     };
 
-    const bodyImageURLs = () => {
+    const originalSubstackImageURL = (raw) => {
+      try {
+        const absolute = new URL(raw, location.href).href;
+        const marker = absolute.indexOf("/https%3A");
+        if (marker < 0) return "";
+        const original = decodeURIComponent(absolute.slice(marker + 1));
+        return isRequiredSubstackImage(original) ? original : "";
+      } catch (_) {
+        return "";
+      }
+    };
+
+    const bodyImages = () => {
       const article = document.querySelector(".body.markup") ||
         document.querySelector("[data-testid='post-content']") ||
         document.querySelector(".available-content") ||
         document.querySelector("article") ||
         document.body;
-      const urls = new Set();
-      const add = (raw) => {
-        if (!raw) return;
-        const absolute = new URL(raw, location.href).href;
-        if (isRequiredSubstackImage(absolute)) urls.add(absolute);
-      };
+      const images = [];
+      const seen = new Set();
       article.querySelectorAll("img").forEach((img) => {
+        const candidates = [];
+        const add = (raw) => {
+          if (!raw) return;
+          const absolute = new URL(raw, location.href).href;
+          if (isRequiredSubstackImage(absolute) && !candidates.includes(absolute)) candidates.push(absolute);
+          const original = originalSubstackImageURL(absolute);
+          if (original && !candidates.includes(original)) candidates.push(original);
+        };
         const srcset = img.getAttribute("srcset") || img.getAttribute("data-srcset") || "";
-        const firstResponsiveSource = srcset.split(",")[0]?.trim().split(/\s+/)[0];
-        add(img.currentSrc || img.getAttribute("src") || img.getAttribute("data-src") || firstResponsiveSource);
+        add(img.currentSrc);
+        add(img.getAttribute("src"));
+        add(img.getAttribute("data-src"));
+        srcset.split(",").forEach((source) => add(source.trim().split(/\s+/)[0]));
+        if (!candidates.length) return;
+        const sourceURL = candidates.find((candidate) => {
+          try { return new URL(candidate).hostname.toLowerCase().includes("substack-post-media"); }
+          catch (_) { return false; }
+        }) || candidates[0];
+        if (seen.has(sourceURL)) return;
+        seen.add(sourceURL);
+        images.push({sourceURL, candidates});
       });
-      return Array.from(urls);
+      return images;
     };
 
     const loadBodyImage = async (raw) => {
@@ -126,21 +152,36 @@ class WARCdriverFontLoader {
     root.scrollTop = 0;
     await sleep(100);
     await withTimeout(loadFonts(), Math.min(700, timeLeft()));
-    const requiredImages = bodyImageURLs();
+    const requiredImages = bodyImages();
     let loadedImages = 0;
     let failedImages = 0;
+    const failedImageURLs = [];
     let cursor = 0;
     const workers = Array.from({length: Math.min(8, Math.max(1, requiredImages.length))}, async () => {
       while (cursor < requiredImages.length && timeLeft() > 250) {
-        const imageURL = requiredImages[cursor++];
-        if (await loadBodyImage(imageURL)) loadedImages += 1;
-        else failedImages += 1;
+        const image = requiredImages[cursor++];
+        let loaded = false;
+        for (const candidate of image.candidates) {
+          if (await loadBodyImage(candidate)) {
+            loaded = true;
+            break;
+          }
+        }
+        if (loaded) loadedImages += 1;
+        else {
+          failedImages += 1;
+          failedImageURLs.push(image.sourceURL);
+        }
       }
     });
     await Promise.allSettled(workers);
-    failedImages += Math.max(0, requiredImages.length - loadedImages - failedImages);
+    for (let index = cursor; index < requiredImages.length; index += 1) {
+      failedImageURLs.push(requiredImages[index].sourceURL);
+      failedImages += 1;
+    }
+    const encodedFailedURLs = encodeURIComponent(JSON.stringify(failedImageURLs));
     yield {
-      msg: `body image capture required=${requiredImages.length} loaded=${loadedImages} failed=${failedImages} page=${location.href}`,
+      msg: `body image capture required=${requiredImages.length} loaded=${loadedImages} failed=${failedImages} page=${location.href} failed_urls=${encodedFailedURLs}`,
       fontFaces, loadedFonts, failedFonts, scrollSteps
     };
   }

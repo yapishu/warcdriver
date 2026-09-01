@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -110,7 +111,8 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	isFullSubstackMode := job.Scope == "substack"
 	isSubstackUpdate := job.Scope == "explicit_urls" && isSubstackURL(job.URL) && allSubstackPostURLs(explicit)
 	isSubstackMode := isFullSubstackMode || isSubstackUpdate
-	validateSubstackImages := isSubstackMode || isSubstackPostURL(job.URL)
+	isSubstackCapture := isSubstackMode || isSubstackPostURL(job.URL)
+	validateSubstackImages := isSubstackCapture
 	captureStartURL := job.URL
 	captureScope := job.Scope
 	captureDepth := job.Depth
@@ -171,22 +173,34 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		jobLog("info", "capture browser mode: headed Brave via Xvfb")
 	}
 	pageDelay := a.captureSettingInt(jobCtx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
-	if isSubstackMode && pageDelay < substackMinPageDelay {
+	if isSubstackCapture && pageDelay < substackMinPageDelay {
 		pageDelay = substackMinPageDelay
 	}
 	pageRetries := a.captureSettingInt(jobCtx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", defaultCapturePageRetries, 0, 5)
 	useSitemap := a.captureSettingBool(jobCtx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
 	jobLog("info", fmt.Sprintf("capture pacing: %ds page delay, %d page retries", pageDelay, pageRetries))
 
-	type imageCaptureCheck struct{ Required, Loaded, Failed int }
+	type imageCaptureCheck struct {
+		Required, Loaded, Failed int
+		FailedURLs               []string
+	}
 	imageChecks := map[string]imageCaptureCheck{}
 	imageCheckRx := regexp.MustCompile(`body image capture required=(\d+) loaded=(\d+) failed=(\d+) page=(https?://\S+)`)
+	imageFailedURLsRx := regexp.MustCompile(`failed_urls=(\S+)`)
 	onCaptureLog := func(level, message string) {
 		if match := imageCheckRx.FindStringSubmatch(message); len(match) == 5 {
 			required, _ := strconv.Atoi(match[1])
 			loaded, _ := strconv.Atoi(match[2])
 			failed, _ := strconv.Atoi(match[3])
-			imageChecks[normalizeURL(match[4])] = imageCaptureCheck{Required: required, Loaded: loaded, Failed: failed}
+			var failedURLs []string
+			if urlMatch := imageFailedURLsRx.FindStringSubmatch(message); len(urlMatch) == 2 {
+				if decoded, err := url.QueryUnescape(urlMatch[1]); err == nil {
+					_ = json.Unmarshal([]byte(decoded), &failedURLs)
+				}
+			}
+			imageChecks[normalizeURL(match[4])] = imageCaptureCheck{
+				Required: required, Loaded: loaded, Failed: failed, FailedURLs: failedURLs,
+			}
 		}
 		jobLog(level, message)
 		_ = a.store.UpdateJobMessage(context.Background(), job.ID, message)
@@ -305,8 +319,12 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 				retryURLs = append(retryURLs, page.URL)
 				continue
 			}
-			if check.Failed > 0 || check.Loaded < check.Required {
-				jobLog("warn", fmt.Sprintf("skip captured page %s: %d/%d required Substack body images failed to load", page.URL, check.Failed, check.Required))
+			brokenImages, unresolvedImages := classifyFailedSubstackImages(jobCtx, check.Failed, check.FailedURLs)
+			if brokenImages > 0 {
+				jobLog("warn", fmt.Sprintf("captured page %s contains %d source-broken Substack body images; preserving the page because the live CDN source is empty or missing", page.URL, brokenImages))
+			}
+			if unresolvedImages > 0 || check.Loaded+brokenImages < check.Required {
+				jobLog("warn", fmt.Sprintf("skip captured page %s: %d/%d reachable Substack body images failed to load", page.URL, unresolvedImages, check.Required-brokenImages))
 				retryURLs = append(retryURLs, page.URL)
 				continue
 			}
@@ -384,6 +402,45 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	} else {
 		jobLog("info", fmt.Sprintf("job complete: captured %d pages", indexed))
 	}
+}
+
+func classifyFailedSubstackImages(ctx context.Context, failed int, rawURLs []string) (broken, unresolved int) {
+	if failed <= 0 {
+		return 0, 0
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	checked := 0
+	seen := map[string]bool{}
+	for _, rawURL := range rawURLs {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" || seen[rawURL] {
+			continue
+		}
+		seen[rawURL] = true
+		checked++
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+		if err != nil {
+			unresolved++
+			continue
+		}
+		req.Header.Set("User-Agent", "WARCdriver/1.0 Substack image validation")
+		resp, err := client.Do(req)
+		if err != nil {
+			unresolved++
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone ||
+			(resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength == 0) {
+			broken++
+		} else {
+			unresolved++
+		}
+	}
+	if checked < failed {
+		unresolved += failed - checked
+	}
+	return broken, unresolved
 }
 
 func (a *App) queuePageRetries(ctx context.Context, parent *ArchiveJobRecord, urls []string, jobLog func(level, msg string)) {

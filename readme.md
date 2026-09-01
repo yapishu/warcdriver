@@ -19,7 +19,7 @@ Open `http://localhost:8808/` and log in with the bootstrap admin account.
 The capture form creates Browsertrix jobs. Useful fields:
 
 - `URL`: seed URL.
-- `Substack mode`: reads the complete `/p/...` post list from the publication sitemap, captures the homepage only for publication metadata, excludes comment routes, explicitly verifies each Substack-CDN body image, and records every missing or failed post for isolated retries. It starts at a 10-second page cadence and applies escalating in-crawl cooldowns when Substack returns HTTP 429.
+- `Substack mode`: reads the complete `/p/...` post list from the publication sitemap, captures the homepage only for publication metadata, excludes comment routes, explicitly verifies each reachable Substack-CDN body image, and records every missing or failed post for isolated retries. Optimized image URLs fall back to their original CDN source; upstream zero-byte, 404, and 410 images are logged as source-broken without invalidating an otherwise complete post. It starts at a 10-second page cadence and applies escalating in-crawl cooldowns when Substack returns HTTP 429.
 - `Incremental Substack updates`: publication owners can use **Check for new posts** from the publication index. WARCdriver diffs the current sitemap against indexed and canonical post URLs, then captures only new or previously missing posts with the site's saved cookies, visibility, validation, retry, and cooldown settings.
 - `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Linked-page and subdomain scopes stay on the seed hostname; prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
 - `Depth`: link traversal depth. Broad scopes use `All`.
