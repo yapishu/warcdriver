@@ -312,7 +312,8 @@ function scopeLabel(scope: ArchiveScope | string) {
     linked_pages: "Linked pages",
     same_subdomain: "Subdomain",
     prefix: "Prefix",
-    explicit_urls: "Explicit URLs"
+    explicit_urls: "Explicit URLs",
+    substack: "Substack"
   };
   return labels[scope] || scope.replace(/_/g, " ");
 }
@@ -614,6 +615,7 @@ function CaptureDock() {
   const [busy, setBusy] = useState(false);
   const [url, setURL] = useState("");
   const [pathExcludeRx, setPathExcludeRx] = useState("");
+  const [cookieProfileID, setCookieProfileID] = useState("");
   const [scope, setScope] = useState<ArchiveScope>("single_page");
   const [depth, setDepth] = useState(0);
   const [unlimitedPages, setUnlimitedPages] = useState(false);
@@ -656,6 +658,7 @@ function CaptureDock() {
       formEl.reset();
       setURL("");
       setPathExcludeRx("");
+      setCookieProfileID("");
       setScope("single_page");
       setDepth(0);
       setUnlimitedPages(false);
@@ -673,13 +676,28 @@ function CaptureDock() {
     if (next === "single_page" || next === "explicit_urls") {
       setDepth(0);
       updateUnlimitedPages(false);
-    } else if (next === "same_subdomain" || next === "prefix") {
+    } else if (next === "same_subdomain" || next === "prefix" || next === "substack") {
       setDepth(-1);
       updateUnlimitedPages(true);
     } else if (depth < 1) {
       setDepth(1);
       updateUnlimitedPages(false);
     }
+  }
+
+  function updateSubstackMode(enabled: boolean) {
+    if (!enabled) {
+      setScope("single_page");
+      setDepth(0);
+      updateUnlimitedPages(false);
+      return;
+    }
+    setScope("substack");
+    setDepth(0);
+    updateUnlimitedPages(true);
+    setPathExcludeRx(substackCommentExcludeRx);
+    const substackProfile = profiles.find((profile) => profile.name.toLowerCase() === "substack");
+    if (substackProfile) setCookieProfileID(substackProfile.id);
   }
 
   function updateUnlimitedPages(next: boolean) {
@@ -736,19 +754,32 @@ function CaptureDock() {
           </button>
         </div>
         <div className="capture-options-row">
-          <label className="scope-field">
-            Scope
-            <select name="scope" value={scope} onChange={(event) => updateScope(event.target.value as ArchiveScope)}>
-              <option value="single_page">Single page</option>
-              <option value="linked_pages">Linked pages</option>
-              <option value="same_subdomain">Subdomain</option>
-              <option value="prefix">URL prefix</option>
-              <option value="explicit_urls">Explicit URLs</option>
-            </select>
+          <label className="check-field" title="Read every exact /p/ post URL from the publication sitemap, exclude comments, and retry missing posts.">
+            <input
+              name="substackMode"
+              type="checkbox"
+              checked={scope === "substack"}
+              onChange={(event) => updateSubstackMode(event.target.checked)}
+            />
+            Substack mode
           </label>
+          {scope !== "substack" ? (
+            <label className="scope-field">
+              Scope
+              <select name="scope" value={scope} onChange={(event) => updateScope(event.target.value as ArchiveScope)}>
+                <option value="single_page">Single page</option>
+                <option value="linked_pages">Linked pages</option>
+                <option value="same_subdomain">Subdomain</option>
+                <option value="prefix">URL prefix</option>
+                <option value="explicit_urls">Explicit URLs</option>
+              </select>
+            </label>
+          ) : (
+            <span className="static-input">Sitemap posts only</span>
+          )}
           <label className="small-field">
             Depth
-            {scope === "same_subdomain" || scope === "prefix" ? (
+            {scope === "same_subdomain" || scope === "prefix" || scope === "substack" ? (
               <span className="static-input">All</span>
             ) : (
               <input
@@ -786,7 +817,7 @@ function CaptureDock() {
           </label>
           <label className="cookie-field">
             Cookies
-            <select name="cookieProfileId" defaultValue="">
+            <select name="cookieProfileId" value={cookieProfileID} onChange={(event) => setCookieProfileID(event.target.value)}>
               <option value="">None</option>
               {profiles.map((profile) => (
                 <option key={profile.id} value={profile.id}>
@@ -821,6 +852,7 @@ function CaptureDock() {
               placeholder="e.g. ^/p/[^/]+/comments?(?:/|$)"
               spellCheck={false}
               title="Reject candidate page URLs whose path matches this regex after scope matching. comments? matches both /comment/<id> and /comments."
+              readOnly={scope === "substack"}
             />
           </label>
           <label className="check-field">
@@ -911,6 +943,10 @@ function JobPage({ id }: { id: string }) {
     await api.deleteJob(id);
     window.location.hash = "/jobs";
   }
+  async function retryJob() {
+    const retry = await api.retryJob(id);
+    window.location.hash = `/jobs/${retry.id}`;
+  }
   return (
     <Resource load={load}>
       {(job) => (
@@ -944,6 +980,12 @@ function JobPage({ id }: { id: string }) {
                   <button className="icon-button" type="button" onClick={cancelJob}>
                     <XCircle size={16} />
                     Cancel
+                  </button>
+                )}
+                {job.status !== "queued" && job.status !== "running" && (
+                  <button className="icon-button" type="button" onClick={retryJob}>
+                    <RefreshCw size={16} />
+                    Retry
                   </button>
                 )}
                 {job.status !== "queued" && job.status !== "running" && (
@@ -1075,7 +1117,13 @@ function SitesPage() {
 }
 
 function SitePage({ id }: { id: string }) {
-  const load = useLoader(() => api.site(id), [id]);
+  const [query, setQuery] = useState("");
+  const load = useLoader(async () => {
+    const detail = await api.site(id);
+    if (!query.trim()) return detail;
+    const search = await api.items({ siteId: id, q: query, limit: 1000 });
+    return { ...detail, items: search.items };
+  }, [id, query]);
   async function deleteSite() {
     await api.deleteSite(id);
     window.location.hash = "/sites";
@@ -1087,8 +1135,13 @@ function SitePage({ id }: { id: string }) {
           <PageHeader
             eyebrow={site.host}
             title={site.title || site.host}
+            subtitle={site.summary}
             aside={
               <div className="action-row">
+                <label className="search-box">
+                  <Search size={16} />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search full post contents" />
+                </label>
                 <span>{site.itemCount} items</span>
                 <ConfirmButton
                   className="danger-button"
@@ -2052,7 +2105,7 @@ function PaginatedSiteGrid({ sites }: { sites: Site[] }) {
               <span>{site.itemCount} items</span>
             </div>
             <h2>{site.title || site.host}</h2>
-            <p>{site.host}</p>
+            <p>{site.summary || site.host}</p>
             <time>{formatDate(site.updatedAt)}</time>
           </a>
         ))}

@@ -42,6 +42,7 @@ type BrowsertrixCaptureOptions struct {
 	PageDelay     int
 	PageRetries   int
 	UseSitemap    bool
+	SubstackMode  bool
 	OnLog         func(level, message string)
 }
 
@@ -133,7 +134,11 @@ func (a *App) captureArchiveWithBrowsertrix(ctx context.Context, opts Browsertri
 	waitCtx := ctx
 	cancel := func() {}
 	if opts.MaxPages > 0 {
-		waitCtx, cancel = context.WithTimeout(ctx, captureTimeout(opts.MaxPages)+2*time.Minute)
+		timeout := captureTimeout(opts.MaxPages) + 2*time.Minute
+		if opts.SubstackMode {
+			timeout = 24 * time.Hour
+		}
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 
@@ -257,6 +262,7 @@ func browsertrixRequestSummary(opts BrowsertrixCaptureOptions) map[string]any {
 		"pageDelay":             browsertrixPageExtraDelay(opts),
 		"pageRetries":           browsertrixMaxPageRetries(opts),
 		"useSitemap":            opts.UseSitemap,
+		"substackMode":          opts.SubstackMode,
 		"fontLoader":            true,
 		"fontLoaderMaxMS":       browsertrixFontBehaviorMaxMS,
 		"fontLoaderScrollSteps": browsertrixFontBehaviorScroll,

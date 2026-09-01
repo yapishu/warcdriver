@@ -19,6 +19,7 @@ Open `http://localhost:8808/` and log in with the bootstrap admin account.
 The capture form creates Browsertrix jobs. Useful fields:
 
 - `URL`: seed URL.
+- `Substack mode`: reads the complete `/p/...` post list from the publication sitemap, captures the homepage only for publication metadata, excludes comment routes, and queues isolated retries for every missing or failed post.
 - `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Linked-page and subdomain scopes stay on the seed hostname; prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
 - `Depth`: link traversal depth. Broad scopes use `All`.
 - `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
@@ -28,6 +29,8 @@ The capture form creates Browsertrix jobs. Useful fields:
 - `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
 
 Public captures use unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access.
+
+Site pages paginate the complete post index and search titles, URLs, summaries, and full captured post text.
 
 ## Cookies
 

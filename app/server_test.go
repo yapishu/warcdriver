@@ -92,6 +92,21 @@ func TestNormalizeArchiveJobRejectsBadPathExcludeRegex(t *testing.T) {
 	}
 }
 
+func TestNormalizeArchiveJobSubstackModeUsesPublicationHomepage(t *testing.T) {
+	scope := api.Substack
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://Publication.Substack.com/p/post?utm_source=x", Scope: &scope}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://publication.substack.com/" || got.Scope != "substack" || got.Depth != 0 || got.MaxPages != 0 {
+		t.Fatalf("normalized Substack job = %+v", got)
+	}
+	if got.PathExcludeRx != substackCommentExcludeRx {
+		t.Fatalf("path exclude = %q", got.PathExcludeRx)
+	}
+}
+
 func TestReplayUIAssetIsAvailableWithoutAuthentication(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/warcs/ui.js", nil)
 	rec := httptest.NewRecorder()
@@ -177,7 +192,7 @@ func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	site, err := store.UpsertSite(ctx, "example.com", "Example")
+	site, err := store.UpsertSite(ctx, "example.com", "Example", "Example site")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +243,7 @@ func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 	}
 }
 
-func TestQueueRateLimitedPageRetriesCreatesDeduplicatedSinglePageJobs(t *testing.T) {
+func TestQueuePageRetriesCreatesDeduplicatedSinglePageJobs(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	store, err := OpenStore(ctx, dataDir)
@@ -256,7 +271,7 @@ func TestQueueRateLimitedPageRetriesCreatesDeduplicatedSinglePageJobs(t *testing
 		t.Fatal(err)
 	}
 	app := &App{store: store, dataDir: dataDir}
-	app.queueRateLimitedPageRetries(ctx, parent, []string{
+	app.queuePageRetries(ctx, parent, []string{
 		"https://publication.substack.com/p/one",
 		"https://publication.substack.com/p/one",
 		"https://publication.substack.com/p/two",

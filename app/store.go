@@ -88,6 +88,7 @@ type SiteRecord struct {
 	ID        string
 	Host      string
 	Title     sql.NullString
+	Summary   sql.NullString
 	ItemCount int
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -217,6 +218,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			host TEXT NOT NULL UNIQUE,
 			title TEXT,
+			summary TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -246,6 +248,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			status_code INTEGER,
 			content_type TEXT,
 			markdown_path TEXT,
+			search_text TEXT,
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_site_created ON items(site_id, created_at DESC)`,
@@ -267,6 +270,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureItemsSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSitesSchema(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureArchiveJobsSchema(ctx); err != nil {
@@ -401,10 +407,27 @@ func (s *Store) ensureItemsSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := cols["replayable"]; ok {
-		return nil
+	if _, ok := cols["replayable"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return err
+		}
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1`)
+	if _, ok := cols["search_text"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN search_text TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureSitesSchema(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "sites")
+	if err != nil {
+		return err
+	}
+	if _, ok := cols["summary"]; !ok {
+		_, err = s.db.ExecContext(ctx, `ALTER TABLE sites ADD COLUMN summary TEXT`)
+	}
 	return err
 }
 
@@ -1222,16 +1245,19 @@ func (s *Store) ListJobLogs(ctx context.Context, jobID string) ([]JobLogRecord, 
 	return out, rows.Err()
 }
 
-func (s *Store) UpsertSite(ctx context.Context, host, title string) (*SiteRecord, error) {
+func (s *Store) UpsertSite(ctx context.Context, host, title, summary string) (*SiteRecord, error) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
 		return nil, fmt.Errorf("empty host")
 	}
 	now := time.Now().UTC()
 	id := uuid.NewString()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sites(id, host, title, created_at, updated_at) VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(host) DO UPDATE SET title = COALESCE(NULLIF(excluded.title, ''), sites.title), updated_at = excluded.updated_at`,
-		id, host, title, formatTime(now), formatTime(now))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sites(id, host, title, summary, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(host) DO UPDATE SET
+			title = COALESCE(NULLIF(sites.title, ''), excluded.title),
+			summary = COALESCE(NULLIF(sites.summary, ''), excluded.summary),
+			updated_at = excluded.updated_at`,
+		id, host, title, summary, formatTime(now), formatTime(now))
 	if err != nil {
 		return nil, err
 	}
@@ -1239,20 +1265,20 @@ func (s *Store) UpsertSite(ctx context.Context, host, title string) (*SiteRecord
 }
 
 func (s *Store) GetSiteByHost(ctx context.Context, host string) (*SiteRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s LEFT JOIN items i ON i.site_id = s.id WHERE s.host = ? GROUP BY s.id`, strings.ToLower(host))
 	return scanSite(row)
 }
 
 func (s *Store) GetSite(ctx context.Context, id string) (*SiteRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s LEFT JOIN items i ON i.site_id = s.id WHERE s.id = ? GROUP BY s.id`, id)
 	return scanSite(row)
 }
 
 func (s *Store) GetSiteVisible(ctx context.Context, id string, user *UserRecord) (*SiteRecord, error) {
 	userID, isAdmin := accessArgs(user)
-	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s
 		JOIN items i ON i.site_id = s.id
 		JOIN captures c ON c.id = i.capture_id
@@ -1277,7 +1303,7 @@ func (s *Store) DeleteSite(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListSites(ctx context.Context, limit int) ([]SiteRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s LEFT JOIN items i ON i.site_id = s.id GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1296,7 +1322,7 @@ func (s *Store) ListSites(ctx context.Context, limit int) ([]SiteRecord, error) 
 
 func (s *Store) ListSitesVisible(ctx context.Context, user *UserRecord, limit int) ([]SiteRecord, error) {
 	userID, isAdmin := accessArgs(user)
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s
 		JOIN items i ON i.site_id = s.id
 		JOIN captures c ON c.id = i.capture_id
@@ -1321,7 +1347,7 @@ func (s *Store) ListSitesVisible(ctx context.Context, user *UserRecord, limit in
 func scanSite(row interface{ Scan(dest ...any) error }) (*SiteRecord, error) {
 	var rec SiteRecord
 	var created, updated string
-	if err := row.Scan(&rec.ID, &rec.Host, &rec.Title, &rec.ItemCount, &created, &updated); err != nil {
+	if err := row.Scan(&rec.ID, &rec.Host, &rec.Title, &rec.Summary, &rec.ItemCount, &created, &updated); err != nil {
 		return nil, err
 	}
 	var err error
@@ -1463,6 +1489,11 @@ func (s *Store) SetItemMarkdownPath(ctx context.Context, itemID, path string) er
 	return err
 }
 
+func (s *Store) SetItemSearchText(ctx context.Context, itemID, text string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE items SET search_text = ? WHERE id = ?`, text, itemID)
+	return err
+}
+
 func (s *Store) UpdateItemEnrichment(ctx context.Context, itemID, summary string, tags []string) error {
 	rawTags, err := json.Marshal(tags)
 	if err != nil {
@@ -1511,9 +1542,9 @@ func (s *Store) ListItems(ctx context.Context, siteID, query string, limit int) 
 		args = append(args, siteID)
 	}
 	if strings.TrimSpace(query) != "" {
-		where = append(where, "(url LIKE ? OR title LIKE ? OR summary LIKE ?)")
+		where = append(where, "(url LIKE ? OR title LIKE ? OR summary LIKE ? OR search_text LIKE ?)")
 		q := "%" + strings.TrimSpace(query) + "%"
-		args = append(args, q, q, q)
+		args = append(args, q, q, q, q)
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
@@ -1542,9 +1573,9 @@ func (s *Store) ListItemsVisible(ctx context.Context, user *UserRecord, siteID, 
 		args = append(args, siteID)
 	}
 	if strings.TrimSpace(query) != "" {
-		where = append(where, "(i.url LIKE ? OR i.title LIKE ? OR i.summary LIKE ?)")
+		where = append(where, "(i.url LIKE ? OR i.title LIKE ? OR i.summary LIKE ? OR i.search_text LIKE ?)")
 		q := "%" + strings.TrimSpace(query) + "%"
-		args = append(args, q, q, q)
+		args = append(args, q, q, q, q)
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.job_id, i.capture_id, i.site_id, i.url, i.canonical_url, i.title, i.summary, i.tags_json,

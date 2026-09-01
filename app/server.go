@@ -475,6 +475,46 @@ func (a *App) CancelArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id
 	writeJSON(w, http.StatusOK, apiArchiveJob(job))
 }
 
+func (a *App) RetryArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
+	if !a.canManageJob(w, r, id) {
+		return
+	}
+	original, err := a.store.GetArchiveJob(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if original.Status == StatusQueued || original.Status == StatusRunning {
+		writeError(w, http.StatusConflict, "running jobs cannot be retried")
+		return
+	}
+	var urls []string
+	_ = json.Unmarshal([]byte(original.URLsJSON), &urls)
+	retryJob, err := a.store.CreateArchiveJob(r.Context(), nullString(original.UserID), ArchiveJobCreate{
+		URL:             original.URL,
+		URLs:            urls,
+		Scope:           original.Scope,
+		Depth:           original.Depth,
+		MaxPages:        original.MaxPages,
+		Prefix:          nullString(original.Prefix),
+		PathExcludeRx:   nullString(original.PathExcludeRx),
+		CookieProfileID: nullString(original.CookieProfileID),
+		Visibility:      original.Visibility,
+		Enrich:          original.Enrich,
+		ReplaceItemID:   nullString(original.ReplaceItemID),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = a.store.AddJobLog(r.Context(), retryJob.ID, "info", fmt.Sprintf("job queued as retry of %s", original.ID))
+	writeJSON(w, http.StatusAccepted, apiArchiveJob(retryJob))
+}
+
 func (a *App) DeleteArchiveJob(w http.ResponseWriter, r *http.Request, id api.Id) {
 	if !a.canManageJob(w, r, id) {
 		return
@@ -516,7 +556,7 @@ func (a *App) GetSite(w http.ResponseWriter, r *http.Request, id api.Id) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	items, err := a.store.ListItemsForSiteVisible(r.Context(), id, user, 200)
+	items, err := a.store.ListItemsForSiteVisible(r.Context(), id, user, 2000)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -554,7 +594,7 @@ func (a *App) ListItems(w http.ResponseWriter, r *http.Request, params api.ListI
 		q = *params.Q
 	}
 	user, _ := userFromContext(r.Context())
-	items, err := a.store.ListItemsVisible(r.Context(), user, siteID, q, boundedLimit(params.Limit, 100, 200))
+	items, err := a.store.ListItemsVisible(r.Context(), user, siteID, q, boundedLimit(params.Limit, 100, 2000))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1007,7 +1047,7 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 		scope = string(*req.Scope)
 	}
 	switch scope {
-	case "single_page", "linked_pages", "same_subdomain", "prefix", "explicit_urls":
+	case "single_page", "linked_pages", "same_subdomain", "prefix", "explicit_urls", "substack":
 	default:
 		return ArchiveJobCreate{}, fmt.Errorf("unsupported scope %q", scope)
 	}
@@ -1024,7 +1064,7 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 	if !scopeProvided && depthProvided && depth > 0 {
 		scope = "linked_pages"
 	}
-	if scope == "single_page" || scope == "explicit_urls" {
+	if scope == "single_page" || scope == "explicit_urls" || scope == "substack" {
 		depth = 0
 	} else if scope == "linked_pages" && depth < 1 {
 		depth = 1
@@ -1032,7 +1072,7 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 		depth = -1
 	}
 	maxPages := 100
-	if scope == "same_subdomain" || scope == "prefix" {
+	if scope == "same_subdomain" || scope == "prefix" || scope == "substack" {
 		maxPages = 0
 	}
 	if req.MaxPages != nil {
@@ -1076,8 +1116,18 @@ func normalizeArchiveJobRequest(req api.CreateArchiveJobJSONRequestBody) (Archiv
 	if maxPages < 0 || maxPages > 1000 {
 		return ArchiveJobCreate{}, fmt.Errorf("maxPages must be between 0 and 1000; use 0 for unlimited")
 	}
+	jobURL := req.Url
+	if scope == "substack" {
+		var err error
+		jobURL, err = substackHomepageURL(req.Url)
+		if err != nil {
+			return ArchiveJobCreate{}, err
+		}
+		pathExcludeRx = substackCommentExcludeRx
+		urls = nil
+	}
 	return ArchiveJobCreate{
-		URL:             req.Url,
+		URL:             jobURL,
 		URLs:            urls,
 		Scope:           scope,
 		Depth:           depth,
@@ -1212,6 +1262,7 @@ func apiSite(s *SiteRecord) api.Site {
 		Id:        s.ID,
 		Host:      s.Host,
 		Title:     nullableString(s.Title),
+		Summary:   nullableString(s.Summary),
 		ItemCount: s.ItemCount,
 		CreatedAt: s.CreatedAt,
 		UpdatedAt: s.UpdatedAt,

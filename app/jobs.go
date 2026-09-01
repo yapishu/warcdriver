@@ -105,6 +105,25 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 
 	var explicit []string
 	_ = json.Unmarshal([]byte(job.URLsJSON), &explicit)
+	isSubstackMode := job.Scope == "substack"
+	captureStartURL := job.URL
+	captureScope := job.Scope
+	captureDepth := job.Depth
+	captureMaxPages := job.MaxPages
+	if isSubstackMode {
+		var err error
+		explicit, err = discoverSubstackPosts(jobCtx, nil, job.URL)
+		if err != nil {
+			jobLog("error", err.Error())
+			_ = a.store.FailJob(ctx, job.ID, err)
+			return
+		}
+		captureStartURL, _ = substackHomepageURL(job.URL)
+		captureScope = "explicit_urls"
+		captureDepth = 0
+		captureMaxPages = len(explicit) + 1
+		jobLog("info", fmt.Sprintf("Substack mode discovered %d posts from sitemap; capturing exact post URLs plus homepage metadata", len(explicit)))
+	}
 
 	var browserCookies []browserCookieData
 	if job.CookieProfileID.Valid {
@@ -141,6 +160,9 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		jobLog("info", "capture browser mode: headed Brave via Xvfb")
 	}
 	pageDelay := a.captureSettingInt(jobCtx, "capture_page_delay", "CAPTURE_PAGE_DELAY", 3, 1, 120)
+	if isSubstackMode && pageDelay < 5 {
+		pageDelay = 5
+	}
 	pageRetries := a.captureSettingInt(jobCtx, "capture_page_retries", "CAPTURE_PAGE_RETRIES", defaultCapturePageRetries, 0, 5)
 	useSitemap := a.captureSettingBool(jobCtx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
 	jobLog("info", fmt.Sprintf("capture pacing: %ds page delay, %d page retries", pageDelay, pageRetries))
@@ -151,11 +173,11 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	}
 	captureOptions := BrowsertrixCaptureOptions{
 		JobID:         job.ID,
-		StartURL:      job.URL,
+		StartURL:      captureStartURL,
 		ExplicitURLs:  explicit,
-		Scope:         job.Scope,
-		Depth:         job.Depth,
-		MaxPages:      job.MaxPages,
+		Scope:         captureScope,
+		Depth:         captureDepth,
+		MaxPages:      captureMaxPages,
 		Prefix:        nullString(job.Prefix),
 		PathExcludeRx: nullString(job.PathExcludeRx),
 		UserAgent:     userAgent,
@@ -165,6 +187,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		PageDelay:     pageDelay,
 		PageRetries:   pageRetries,
 		UseSitemap:    useSitemap,
+		SubstackMode:  isSubstackMode,
 		OnLog:         onCaptureLog,
 	}
 
@@ -182,6 +205,14 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	}
 
 	first := result.Pages[0]
+	if isSubstackMode {
+		if homepage, ok := capturedPageForURL(result.Pages, captureStartURL); ok && capturedPageFailureReason(homepage) == "" {
+			first = homepage
+		} else {
+			first = CapturedPage{URL: captureStartURL, FinalURL: captureStartURL, Title: hostFromURL(captureStartURL), StatusCode: http.StatusOK}
+			jobLog("warn", "Substack homepage metadata was unavailable; preserving publication host metadata instead of using a random post")
+		}
+	}
 	if reason := capturedPageFailureReason(first); reason != "" {
 		err := fmt.Errorf("%s", reason)
 		jobLog("error", err.Error())
@@ -195,7 +226,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		}
 	}
 	siteHost := hostFromURL(job.URL)
-	site, err := a.store.UpsertSite(jobCtx, siteHost, first.Title)
+	site, err := a.store.UpsertSite(jobCtx, siteHost, first.Title, localSummary(first.Markdown))
 	if err != nil {
 		jobLog("error", err.Error())
 		_ = a.store.FailJob(context.Background(), job.ID, err)
@@ -223,17 +254,26 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	}
 
 	indexed := 0
-	var rateLimitedURLs []string
+	retryURLs := []string{}
+	if isSubstackMode {
+		retryURLs = append(retryURLs, missingCapturedURLs(explicit, result.Pages)...)
+		if len(retryURLs) > 0 {
+			jobLog("warn", fmt.Sprintf("Browsertrix produced no page record for %d expected Substack posts; scheduling isolated retries", len(retryURLs)))
+		}
+	}
 	for _, page := range result.Pages {
 		if jobCtx.Err() != nil {
 			jobLog("warn", "capture canceled during indexing")
 			_, _ = a.store.CancelJob(context.Background(), job.ID)
 			return
 		}
+		if isSubstackMode && !isSubstackPostURL(page.URL) {
+			continue
+		}
 		if reason := capturedPageFailureReason(page); reason != "" {
 			jobLog("warn", fmt.Sprintf("skip captured page %s: %s", page.URL, reason))
-			if capturedPageRateLimitReason(page) != "" {
-				rateLimitedURLs = append(rateLimitedURLs, page.URL)
+			if isSubstackPostURL(page.URL) || capturedPageRateLimitReason(page) != "" {
+				retryURLs = append(retryURLs, page.URL)
 			}
 			continue
 		}
@@ -262,6 +302,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			jobLog("error", "failed to write markdown: "+err.Error())
 		} else {
 			_ = a.store.SetItemMarkdownPath(jobCtx, item.ID, mdPath)
+			_ = a.store.SetItemSearchText(jobCtx, item.ID, page.Markdown)
 		}
 		if job.Enrich && shouldEnrich {
 			if summary, tags, err := a.enrichMarkdown(jobCtx, page.Markdown); err == nil {
@@ -284,13 +325,17 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	if err := a.store.FinishJob(context.Background(), job.ID, capture.ID); err != nil {
 		log.Printf("finish job %s: %v", job.ID, err)
 	}
-	if pageRetries > 0 && len(rateLimitedURLs) > 0 {
-		a.queueRateLimitedPageRetries(context.Background(), job, rateLimitedURLs, jobLog)
+	if pageRetries > 0 && len(retryURLs) > 0 {
+		a.queuePageRetries(context.Background(), job, retryURLs, jobLog)
 	}
-	jobLog("info", fmt.Sprintf("job complete: captured %d pages", indexed))
+	if isSubstackMode {
+		jobLog("info", fmt.Sprintf("job complete: indexed %d/%d Substack posts; missing or failed posts were queued for isolated retry", indexed, len(explicit)))
+	} else {
+		jobLog("info", fmt.Sprintf("job complete: captured %d pages", indexed))
+	}
 }
 
-func (a *App) queueRateLimitedPageRetries(ctx context.Context, parent *ArchiveJobRecord, urls []string, jobLog func(level, msg string)) {
+func (a *App) queuePageRetries(ctx context.Context, parent *ArchiveJobRecord, urls []string, jobLog func(level, msg string)) {
 	seen := make(map[string]bool, len(urls))
 	queued := 0
 	for _, rawURL := range urls {
@@ -310,14 +355,14 @@ func (a *App) queueRateLimitedPageRetries(ctx context.Context, parent *ArchiveJo
 			Enrich:          parent.Enrich,
 		})
 		if err != nil {
-			jobLog("error", fmt.Sprintf("failed to queue rate-limit retry for %s: %v", rawURL, err))
+			jobLog("error", fmt.Sprintf("failed to queue page retry for %s: %v", rawURL, err))
 			continue
 		}
-		_ = a.store.AddJobLog(ctx, retryJob.ID, "info", fmt.Sprintf("job queued to retry rate-limited page from job %s", parent.ID))
+		_ = a.store.AddJobLog(ctx, retryJob.ID, "info", fmt.Sprintf("job queued to retry missing or failed page from job %s", parent.ID))
 		queued++
 	}
 	if queued > 0 {
-		jobLog("info", fmt.Sprintf("queued %d rate-limited pages as isolated retry jobs with exponential backoff", queued))
+		jobLog("info", fmt.Sprintf("queued %d missing or failed pages as isolated retry jobs with exponential backoff for rate limits", queued))
 	}
 }
 
@@ -332,19 +377,27 @@ func (a *App) captureWithRateLimitBackoff(ctx context.Context, opts BrowsertrixC
 			a.discardBrowsertrixRun(opts.JobID, jobLog)
 			return nil, fmt.Errorf("no pages captured")
 		}
-		if reason := capturedPageRateLimitReason(result.Pages[0]); reason != "" {
-			a.discardBrowsertrixRun(opts.JobID, jobLog)
-			if attempt >= maxRetries {
-				return nil, fmt.Errorf("%s after %d attempts", reason, attempt+1)
+		primary, _ := capturedPageForURL(result.Pages, opts.StartURL)
+		if !opts.SubstackMode {
+			if primary.URL == "" {
+				primary = result.Pages[0]
 			}
-			delay := rateLimitRetryDelay(attempt)
-			message := fmt.Sprintf("%s; retrying in %s", reason, delay.Round(time.Second))
-			jobLog("warn", message)
-			_ = a.store.UpdateJobMessage(context.Background(), opts.JobID, message)
-			if err := waitForRetry(ctx, delay); err != nil {
-				return nil, err
+		}
+		if !opts.SubstackMode {
+			if reason := capturedPageRateLimitReason(primary); reason != "" {
+				a.discardBrowsertrixRun(opts.JobID, jobLog)
+				if attempt >= maxRetries {
+					return nil, fmt.Errorf("%s after %d attempts", reason, attempt+1)
+				}
+				delay := rateLimitRetryDelay(attempt)
+				message := fmt.Sprintf("%s; retrying in %s", reason, delay.Round(time.Second))
+				jobLog("warn", message)
+				_ = a.store.UpdateJobMessage(context.Background(), opts.JobID, message)
+				if err := waitForRetry(ctx, delay); err != nil {
+					return nil, err
+				}
+				continue
 			}
-			continue
 		}
 		return result, nil
 	}
@@ -415,6 +468,7 @@ func (a *App) replaceCapturedItem(ctx context.Context, job *ArchiveJobRecord, ca
 		}
 		return err
 	}
+	_ = a.store.SetItemSearchText(ctx, job.ReplaceItemID.String, page.Markdown)
 	return nil
 }
 

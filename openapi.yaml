@@ -218,6 +218,24 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /api/archive-jobs/{id}/retry:
+    post:
+      operationId: retryArchiveJob
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "202":
+          description: Replacement archive job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchiveJob"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/sites:
     get:
       operationId: listSites
@@ -227,7 +245,7 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 200
+            maximum: 2000
             default: 100
       responses:
         "200":
@@ -288,7 +306,7 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 200
+            maximum: 2000
             default: 100
       responses:
         "200":
@@ -610,7 +628,7 @@ components:
           type: boolean
     ArchiveScope:
       type: string
-      enum: [single_page, linked_pages, same_subdomain, prefix, explicit_urls]
+      enum: [single_page, linked_pages, same_subdomain, prefix, explicit_urls, substack]
     Visibility:
       type: string
       enum: [private, public]
@@ -640,7 +658,7 @@ components:
           minimum: 0
           maximum: 1000
           default: 100
-          description: Maximum number of pages to capture. Use 0 for unlimited. If omitted, same_subdomain and prefix jobs default to unlimited, while other scopes default to 100.
+          description: Maximum number of pages to capture. Use 0 for unlimited. Substack mode obtains the complete post list from the publication sitemap.
         prefix:
           type: string
           format: uri
@@ -725,6 +743,8 @@ components:
         host:
           type: string
         title:
+          type: string
+        summary:
           type: string
         itemCount:
           type: integer

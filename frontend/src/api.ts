@@ -91,6 +91,7 @@ export const api = {
   jobs: (limit = 50) => request<{ jobs: ArchiveJob[] }>(`/api/archive-jobs?limit=${limit}`),
   job: (id: string) => request<ArchiveJobDetail>(`/api/archive-jobs/${id}`),
   cancelJob: (id: string) => request<ArchiveJob>(`/api/archive-jobs/${id}/cancel`, { method: "POST" }),
+  retryJob: (id: string) => request<ArchiveJob>(`/api/archive-jobs/${id}/retry`, { method: "POST" }),
   deleteJob: (id: string) => request<void>(`/api/archive-jobs/${id}`, { method: "DELETE" }),
   sites: () => request<{ sites: Site[] }>("/api/sites?limit=200"),
   site: (id: string) => request<{ site: Site; items: Item[] }>(`/api/sites/${id}`),

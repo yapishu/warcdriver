@@ -25,6 +25,7 @@ const (
 	Prefix        ArchiveScope = "prefix"
 	SameSubdomain ArchiveScope = "same_subdomain"
 	SinglePage    ArchiveScope = "single_page"
+	Substack      ArchiveScope = "substack"
 )
 
 // Defines values for CookieProfileSourceType.
@@ -106,10 +107,10 @@ type CreateArchiveJobRequest struct {
 	Depth           *int    `json:"depth,omitempty"`
 	Enrich          *bool   `json:"enrich,omitempty"`
 
-	// MaxPages Maximum number of pages to capture. Use 0 for unlimited. If omitted, same_subdomain and prefix jobs default to unlimited, while other scopes default to 100.
+	// MaxPages Maximum number of pages to capture. Use 0 for unlimited. Substack mode obtains the complete post list from the publication sitemap.
 	MaxPages *int `json:"maxPages,omitempty"`
 
-	// PathExcludeRx Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery.
+	// PathExcludeRx Optional regular expression matched against URL paths before capture. Matching pages are excluded from crawl discovery. Substack captures default to ^/p/[^/]+/comments?(?:/|$).
 	PathExcludeRx *string       `json:"pathExcludeRx,omitempty"`
 	Prefix        *string       `json:"prefix,omitempty"`
 	Scope         *ArchiveScope `json:"scope,omitempty"`
@@ -201,8 +202,10 @@ type MeResponse struct {
 
 // Settings defines model for Settings.
 type Settings struct {
-	CaptureHeadless            bool     `json:"captureHeadless"`
-	CapturePageDelay           int      `json:"capturePageDelay"`
+	CaptureHeadless  bool `json:"captureHeadless"`
+	CapturePageDelay int  `json:"capturePageDelay"`
+
+	// CapturePageRetries Retry count for browser load failures and HTTP 429 responses. Rate-limited pages use bounded exponential backoff.
 	CapturePageRetries         int      `json:"capturePageRetries"`
 	CaptureUseSitemap          bool     `json:"captureUseSitemap"`
 	EnrichmentEnabled          bool     `json:"enrichmentEnabled"`
@@ -218,6 +221,7 @@ type Site struct {
 	Host      string    `json:"host"`
 	Id        string    `json:"id"`
 	ItemCount int       `json:"itemCount"`
+	Summary   *string   `json:"summary,omitempty"`
 	Title     *string   `json:"title,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -230,8 +234,10 @@ type SiteDetail struct {
 
 // UpdateSettingsRequest defines model for UpdateSettingsRequest.
 type UpdateSettingsRequest struct {
-	CaptureHeadless    *bool     `json:"captureHeadless,omitempty"`
-	CapturePageDelay   *int      `json:"capturePageDelay,omitempty"`
+	CaptureHeadless  *bool `json:"captureHeadless,omitempty"`
+	CapturePageDelay *int  `json:"capturePageDelay,omitempty"`
+
+	// CapturePageRetries Retry count for browser load failures and HTTP 429 responses. Rate-limited pages use bounded exponential backoff. Set to 0 to disable retries.
 	CapturePageRetries *int      `json:"capturePageRetries,omitempty"`
 	CaptureUseSitemap  *bool     `json:"captureUseSitemap,omitempty"`
 	EnrichmentEnabled  *bool     `json:"enrichmentEnabled,omitempty"`
@@ -339,6 +345,9 @@ type ServerInterface interface {
 	// (POST /api/archive-jobs/{id}/cancel)
 	CancelArchiveJob(w http.ResponseWriter, r *http.Request, id Id)
 
+	// (POST /api/archive-jobs/{id}/retry)
+	RetryArchiveJob(w http.ResponseWriter, r *http.Request, id Id)
+
 	// (POST /api/auth/login)
 	Login(w http.ResponseWriter, r *http.Request)
 
@@ -435,6 +444,11 @@ func (_ Unimplemented) GetArchiveJob(w http.ResponseWriter, r *http.Request, id 
 
 // (POST /api/archive-jobs/{id}/cancel)
 func (_ Unimplemented) CancelArchiveJob(w http.ResponseWriter, r *http.Request, id Id) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// (POST /api/archive-jobs/{id}/retry)
+func (_ Unimplemented) RetryArchiveJob(w http.ResponseWriter, r *http.Request, id Id) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -709,6 +723,39 @@ func (siw *ServerInterfaceWrapper) CancelArchiveJob(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CancelArchiveJob(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RetryArchiveJob operation middleware
+func (siw *ServerInterfaceWrapper) RetryArchiveJob(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionCookieScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RetryArchiveJob(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1506,6 +1553,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/archive-jobs/{id}/cancel", wrapper.CancelArchiveJob)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/archive-jobs/{id}/retry", wrapper.RetryArchiveJob)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/auth/login", wrapper.Login)
