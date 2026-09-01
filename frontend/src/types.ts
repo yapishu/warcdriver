@@ -48,6 +48,23 @@ export type Site = {
   updatedAt: string;
 };
 
+export type SiteIndexEntry = {
+  status: "succeeded" | "failed";
+  url: string;
+  error?: string;
+  item?: Item;
+};
+
+export type SiteIndex = {
+  site: Site;
+  pages: SiteIndexEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  canManage: boolean;
+  visibility: Visibility;
+};
+
 export type Item = {
   id: string;
   siteId: string;

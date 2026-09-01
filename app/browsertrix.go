@@ -26,24 +26,25 @@ const (
 )
 
 type BrowsertrixCaptureOptions struct {
-	JobID         string
-	StartURL      string
-	ExplicitURLs  []string
-	Scope         string
-	Depth         int
-	MaxPages      int
-	Prefix        string
-	PathExcludeRx string
-	UserAgent     string
-	ProfilePath   string
-	Cookies       []browserCookieData
-	BlockAds      bool
-	Headless      bool
-	PageDelay     int
-	PageRetries   int
-	UseSitemap    bool
-	SubstackMode  bool
-	OnLog         func(level, message string)
+	JobID                  string
+	StartURL               string
+	ExplicitURLs           []string
+	Scope                  string
+	Depth                  int
+	MaxPages               int
+	Prefix                 string
+	PathExcludeRx          string
+	UserAgent              string
+	ProfilePath            string
+	Cookies                []browserCookieData
+	BlockAds               bool
+	Headless               bool
+	PageDelay              int
+	PageRetries            int
+	UseSitemap             bool
+	SubstackMode           bool
+	ValidateSubstackImages bool
+	OnLog                  func(level, message string)
 }
 
 type browsertrixDone struct {
@@ -125,6 +126,11 @@ func (a *App) captureArchiveWithBrowsertrix(ctx context.Context, opts Browsertri
 	}
 	if err := atomicWriteFile(filepath.Join(jobDir, "request.json"), mustJSON(browsertrixRequestSummary(opts)), 0o644); err != nil {
 		return nil, err
+	}
+	if opts.SubstackMode {
+		if err := atomicWriteFile(filepath.Join(jobDir, "substack-mode"), []byte("adaptive-cooldown\n"), 0o644); err != nil {
+			return nil, err
+		}
 	}
 	if err := atomicWriteFile(filepath.Join(jobDir, "queued"), []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o644); err != nil {
 		return nil, err
@@ -247,25 +253,26 @@ func browsertrixConfig(opts BrowsertrixCaptureOptions) (map[string]any, error) {
 
 func browsertrixRequestSummary(opts BrowsertrixCaptureOptions) map[string]any {
 	return map[string]any{
-		"jobId":                 opts.JobID,
-		"startUrl":              opts.StartURL,
-		"explicitUrls":          opts.ExplicitURLs,
-		"scope":                 opts.Scope,
-		"depth":                 opts.Depth,
-		"maxPages":              opts.MaxPages,
-		"prefix":                opts.Prefix,
-		"pathExcludeRx":         opts.PathExcludeRx,
-		"userAgentSet":          strings.TrimSpace(opts.UserAgent) != "",
-		"cookieCount":           len(opts.Cookies),
-		"blockAds":              opts.BlockAds,
-		"headless":              opts.Headless,
-		"pageDelay":             browsertrixPageExtraDelay(opts),
-		"pageRetries":           browsertrixMaxPageRetries(opts),
-		"useSitemap":            opts.UseSitemap,
-		"substackMode":          opts.SubstackMode,
-		"fontLoader":            true,
-		"fontLoaderMaxMS":       browsertrixFontBehaviorMaxMS,
-		"fontLoaderScrollSteps": browsertrixFontBehaviorScroll,
+		"jobId":                  opts.JobID,
+		"startUrl":               opts.StartURL,
+		"explicitUrls":           opts.ExplicitURLs,
+		"scope":                  opts.Scope,
+		"depth":                  opts.Depth,
+		"maxPages":               opts.MaxPages,
+		"prefix":                 opts.Prefix,
+		"pathExcludeRx":          opts.PathExcludeRx,
+		"userAgentSet":           strings.TrimSpace(opts.UserAgent) != "",
+		"cookieCount":            len(opts.Cookies),
+		"blockAds":               opts.BlockAds,
+		"headless":               opts.Headless,
+		"pageDelay":              browsertrixPageExtraDelay(opts),
+		"pageRetries":            browsertrixMaxPageRetries(opts),
+		"useSitemap":             opts.UseSitemap,
+		"substackMode":           opts.SubstackMode,
+		"validateSubstackImages": opts.ValidateSubstackImages,
+		"fontLoader":             true,
+		"fontLoaderMaxMS":        browsertrixFontBehaviorMaxMS,
+		"fontLoaderScrollSteps":  browsertrixFontBehaviorScroll,
 	}
 }
 
@@ -323,12 +330,12 @@ func browsertrixScopeExcludeRx(opts BrowsertrixCaptureOptions) string {
 }
 
 func browsertrixBehaviors(opts BrowsertrixCaptureOptions) []string {
-	behaviors := []string{"autoplay", "autofetch"}
+	behaviors := []string{"autofetch"}
 	// The bounded WARCdriver font/asset behavior already scrolls the page to
 	// activate lazy resources. Browsertrix's generic autoscroll can wait for its
 	// full behavior timeout on otherwise complete Substack posts.
 	if !isSubstackURL(opts.StartURL) {
-		behaviors = append(behaviors, "autoscroll")
+		behaviors = append(behaviors, "autoplay", "autoscroll")
 	}
 	if !isSubstackURL(opts.StartURL) {
 		behaviors = append(behaviors, "siteSpecific")

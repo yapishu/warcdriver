@@ -94,6 +94,15 @@ type SiteRecord struct {
 	UpdatedAt time.Time
 }
 
+type SiteFailureRecord struct {
+	SiteID    string
+	JobID     string
+	URL       string
+	Error     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type ItemRecord struct {
 	ID           string
 	JobID        string
@@ -253,6 +262,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_site_created ON items(site_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_capture ON items(capture_id)`,
+		`CREATE TABLE IF NOT EXISTS site_failures (
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			job_id TEXT NOT NULL REFERENCES archive_jobs(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			error TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(site_id, url)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_site_failures_site_updated ON site_failures(site_id, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS job_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id TEXT NOT NULL REFERENCES archive_jobs(id) ON DELETE CASCADE,
@@ -1300,6 +1319,91 @@ func (s *Store) DeleteSite(ctx context.Context, id string) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *Store) SiteVisibility(ctx context.Context, siteID string) (string, error) {
+	var total, public int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), COALESCE(sum(CASE WHEN visibility = 'public' THEN 1 ELSE 0 END), 0)
+		FROM captures WHERE site_id = ?`, siteID).Scan(&total, &public)
+	if err != nil {
+		return VisibilityPrivate, err
+	}
+	if total > 0 && total == public {
+		return VisibilityPublic, nil
+	}
+	return VisibilityPrivate, nil
+}
+
+func (s *Store) CanManageSite(ctx context.Context, siteID string, user *UserRecord) (bool, error) {
+	if user == nil {
+		return false, nil
+	}
+	if user.IsAdmin {
+		return true, nil
+	}
+	var total, owned int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), COALESCE(sum(CASE WHEN owner_user_id = ? THEN 1 ELSE 0 END), 0)
+		FROM captures WHERE site_id = ?`, user.ID, siteID).Scan(&total, &owned)
+	return total > 0 && total == owned, err
+}
+
+func (s *Store) UpdateSiteVisibility(ctx context.Context, siteID, visibility string) error {
+	visibility = normalizeVisibility(visibility)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE captures SET visibility = ? WHERE site_id = ?`, visibility, siteID)
+	if err != nil {
+		return err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE archive_jobs SET visibility = ? WHERE capture_id IN (SELECT id FROM captures WHERE site_id = ?)`, visibility, siteID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RecordSiteFailure(ctx context.Context, siteID, jobID, rawURL, failure string) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO site_failures(site_id, job_id, url, error, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(site_id, url) DO UPDATE SET job_id = excluded.job_id, error = excluded.error, updated_at = excluded.updated_at`,
+		siteID, jobID, rawURL, failure, now, now)
+	return err
+}
+
+func (s *Store) ClearSiteFailure(ctx context.Context, siteID, rawURL string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM site_failures WHERE site_id = ? AND url = ?`, siteID, rawURL)
+	return err
+}
+
+func (s *Store) ListSiteFailures(ctx context.Context, siteID string) ([]SiteFailureRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT site_id, job_id, url, error, created_at, updated_at
+		FROM site_failures WHERE site_id = ? ORDER BY url`, siteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SiteFailureRecord{}
+	for rows.Next() {
+		var rec SiteFailureRecord
+		var created, updated string
+		if err := rows.Scan(&rec.SiteID, &rec.JobID, &rec.URL, &rec.Error, &created, &updated); err != nil {
+			return nil, err
+		}
+		rec.CreatedAt, _ = parseTime(created)
+		rec.UpdatedAt, _ = parseTime(updated)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListSites(ctx context.Context, limit int) ([]SiteRecord, error) {

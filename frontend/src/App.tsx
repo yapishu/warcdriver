@@ -455,6 +455,18 @@ export function App() {
 
   if (route.name === "viewer") return <ReplayPage id={route.id} />;
   if (boot.state === "loading") return <BootScreen />;
+  if (boot.state !== "ready" && (route.name === "sites" || route.name === "site")) {
+    return (
+      <div className="app-shell public-catalog-shell">
+        <aside className="sidebar">
+          <a className="wordmark" href={href("sites")}><span className="wordmark-icon"><Archive size={19} /></span><span>WARCdriver</span></a>
+          <nav className="side-nav"><a className="active" href={href("sites")}><Library size={17} />Public archives</a></nav>
+          <a className="ghost-button sidebar-logout" href={href("")}><KeyRound size={16} />Owner login</a>
+        </aside>
+        <div className="workspace"><main className="page"><Page route={route} /></main></div>
+      </div>
+    );
+  }
   if (boot.state !== "ready") return <LoginScreen onLogin={onLogin} />;
 
   return (
@@ -1118,19 +1130,32 @@ function SitesPage() {
 
 function SitePage({ id }: { id: string }) {
   const [query, setQuery] = useState("");
-  const load = useLoader(async () => {
-    const detail = await api.site(id);
-    if (!query.trim()) return detail;
-    const search = await api.items({ siteId: id, q: query, limit: 1000 });
-    return { ...detail, items: search.items };
-  }, [id, query]);
+  const [status, setStatus] = useState("all");
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const [refresh, setRefresh] = useState(0);
+  const load = useLoader(
+    () => api.siteIndex(id, { status, q: query, limit: pageSize, offset: page * pageSize }),
+    [id, query, status, page, pageSize, refresh]
+  );
   async function deleteSite() {
     await api.deleteSite(id);
     window.location.hash = "/sites";
   }
+  async function retryFailed(url: string) {
+    const job = await api.retryFailedSitePage(id, url);
+    window.location.hash = `/jobs/${job.id}`;
+  }
+  async function retryAllFailed() {
+    await api.retryFailedSitePages(id);
+    setRefresh((value) => value + 1);
+  }
   return (
     <Resource load={load}>
-      {({ site, items }) => (
+      {(index) => {
+        const { site, pages, total, canManage, visibility } = index;
+        const pageCount = Math.max(1, Math.ceil(total / pageSize));
+        return (
         <>
           <PageHeader
             eyebrow={site.host}
@@ -1140,25 +1165,81 @@ function SitePage({ id }: { id: string }) {
               <div className="action-row">
                 <label className="search-box">
                   <Search size={16} />
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search full post contents" />
+                  <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }} placeholder="Search publication index" />
                 </label>
-                <span>{site.itemCount} items</span>
-                <ConfirmButton
-                  className="danger-button"
-                  title="Delete site"
-                  detail="This removes the site, its captures, and indexed pages from the catalog."
-                  confirmLabel="Delete"
-                  onConfirm={deleteSite}
-                >
-                  <Trash2 size={16} />
-                  Delete
-                </ConfirmButton>
+                <span>{total} pages</span>
+                {canManage && (
+                  <select aria-label="Site visibility" value={visibility} onChange={async (event) => {
+                    await api.updateSiteVisibility(id, event.target.value as Visibility);
+                    setRefresh((value) => value + 1);
+                  }}>
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                  </select>
+                )}
+                {canManage && (
+                  <ConfirmButton
+                    className="danger-button"
+                    title="Delete site"
+                    detail="This removes the site, its captures, and indexed pages from the catalog."
+                    confirmLabel="Delete"
+                    onConfirm={deleteSite}
+                  >
+                    <Trash2 size={16} />
+                    Delete
+                  </ConfirmButton>
+                )}
               </div>
             }
           />
-          <PaginatedItemPanel title="Pages" items={items} />
+          <Panel
+            title={canManage ? "Publication index" : "Archived posts"}
+            action={
+              <div className="action-row">
+                {canManage && (
+                  <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(0); }} aria-label="Capture status filter">
+                    <option value="all">All statuses</option>
+                    <option value="succeeded">Succeeded</option>
+                    <option value="failed">Failed</option>
+                  </select>
+                )}
+                {canManage && status === "failed" && total > 0 && (
+                  <button className="icon-button" type="button" onClick={retryAllFailed}>
+                    <RefreshCw size={15} /> Retry all failed
+                  </button>
+                )}
+                <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(0); }} aria-label="Rows per page">
+                  <option value="20">20</option><option value="50">50</option><option value="100">100</option>
+                </select>
+                <button className="tiny-button" type="button" disabled={page <= 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Prev</button>
+                <span>{page + 1}/{pageCount} · {total} total</span>
+                <button className="tiny-button" type="button" disabled={page >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>Next</button>
+              </div>
+            }
+          >
+            {!pages.length ? <Empty icon={<FileText size={22} />} label="No matching pages" /> : (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead><tr><th>Status</th><th>Title / URL</th><th>Details</th><th>Actions</th></tr></thead>
+                  <tbody>{pages.map((entry) => (
+                    <tr key={`${entry.status}:${entry.url}`}>
+                      <td><span className={entry.status === "failed" ? "status-pill failed" : "status-pill succeeded"}>{entry.status}</span></td>
+                      <td><strong>{entry.item?.title || entry.url}</strong><span className="subline">{entry.url}</span></td>
+                      <td>{entry.error || entry.item?.summary || "Captured"}</td>
+                      <td><div className="row-actions">
+                        {entry.item?.replayable && <a className="view-button compact-view" href={viewerHref(entry.item.captureId, entry.url)} target="_blank" rel="noreferrer"><Maximize2 size={14} /> View</a>}
+                        {entry.item && <a className="row-link" href={href(`items/${entry.item.id}`)}>Details</a>}
+                        {canManage && entry.item && <RecaptureButton itemID={entry.item.id} compact />}
+                        {canManage && entry.status === "failed" && <button className="icon-button compact-action" type="button" onClick={() => retryFailed(entry.url)}><RefreshCw size={14} /> Retry</button>}
+                      </div></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
         </>
-      )}
+      );}}
     </Resource>
   );
 }
@@ -2011,7 +2092,7 @@ function RecaptureButton({ itemID, compact = false }: { itemID: string; compact?
       aria-label="Recapture item"
     >
       <RefreshCw className={busy ? "spin" : undefined} size={compact ? 14 : 16} />
-      {compact ? "Retry" : "Recapture"}
+      {compact ? "Re-grab" : "Recapture"}
     </button>
   );
 }

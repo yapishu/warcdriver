@@ -107,6 +107,52 @@ func TestNormalizeArchiveJobSubstackModeUsesPublicationHomepage(t *testing.T) {
 	}
 }
 
+func TestSiteVisibilityAndFailureCatalog(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateArchiveJob(ctx, "", ArchiveJobCreate{
+		URL: "https://publication.substack.com/", Scope: "substack", Visibility: VisibilityPrivate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := store.UpsertSite(ctx, "publication.substack.com", "Publication", "Summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateCapture(ctx, job.ID, site.ID, "", job.URL, "Publication", filepath.Join(t.TempDir(), "capture.wacz"), VisibilityPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.SiteVisibility(ctx, site.ID); err != nil || got != VisibilityPrivate {
+		t.Fatalf("initial visibility = %q, err=%v", got, err)
+	}
+	if err := store.UpdateSiteVisibility(ctx, site.ID, VisibilityPublic); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.SiteVisibility(ctx, site.ID); err != nil || got != VisibilityPublic {
+		t.Fatalf("updated visibility = %q, err=%v", got, err)
+	}
+	failedURL := "https://publication.substack.com/p/failed"
+	if err := store.RecordSiteFailure(ctx, site.ID, job.ID, failedURL, "HTTP 429"); err != nil {
+		t.Fatal(err)
+	}
+	failures, err := store.ListSiteFailures(ctx, site.ID)
+	if err != nil || len(failures) != 1 || failures[0].URL != failedURL {
+		t.Fatalf("failures = %#v, err=%v", failures, err)
+	}
+	if err := store.ClearSiteFailure(ctx, site.ID, failedURL); err != nil {
+		t.Fatal(err)
+	}
+	failures, err = store.ListSiteFailures(ctx, site.ID)
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("cleared failures = %#v, err=%v", failures, err)
+	}
+}
+
 func TestReplayUIAssetIsAvailableWithoutAuthentication(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/warcs/ui.js", nil)
 	rec := httptest.NewRecorder()

@@ -8,6 +8,7 @@ import type {
   ItemDetail,
   Settings,
   Site,
+  SiteIndex,
   User,
   Visibility,
   WarcMetadata
@@ -95,6 +96,20 @@ export const api = {
   deleteJob: (id: string) => request<void>(`/api/archive-jobs/${id}`, { method: "DELETE" }),
   sites: () => request<{ sites: Site[] }>("/api/sites?limit=200"),
   site: (id: string) => request<{ site: Site; items: Item[] }>(`/api/sites/${id}`),
+  siteIndex: (id: string, params: { status?: string; q?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status && params.status !== "all") query.set("status", params.status);
+    if (params.q) query.set("q", params.q);
+    query.set("limit", String(params.limit || 20));
+    query.set("offset", String(params.offset || 0));
+    return request<SiteIndex>(`/api/sites/${id}/pages?${query}`);
+  },
+  updateSiteVisibility: (id: string, visibility: Visibility) =>
+    request<{ siteId: string; visibility: Visibility }>(`/api/sites/${id}/visibility`, { method: "PUT", body: { visibility } }),
+  retryFailedSitePage: (id: string, url: string) =>
+    request<ArchiveJob>(`/api/sites/${id}/retry-page`, { method: "POST", body: { url } }),
+  retryFailedSitePages: (id: string) =>
+    request<{ queued: number; jobs: ArchiveJob[] }>(`/api/sites/${id}/retry-failed`, { method: "POST" }),
   deleteSite: (id: string) => request<void>(`/api/sites/${id}`, { method: "DELETE" }),
   items: (params: { siteId?: string; q?: string; limit?: number } = {}) => {
     const query = new URLSearchParams();

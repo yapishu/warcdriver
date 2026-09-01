@@ -19,7 +19,7 @@ Open `http://localhost:8808/` and log in with the bootstrap admin account.
 The capture form creates Browsertrix jobs. Useful fields:
 
 - `URL`: seed URL.
-- `Substack mode`: reads the complete `/p/...` post list from the publication sitemap, captures the homepage only for publication metadata, excludes comment routes, and queues isolated retries for every missing or failed post.
+- `Substack mode`: reads the complete `/p/...` post list from the publication sitemap, captures the homepage only for publication metadata, excludes comment routes, explicitly verifies each Substack-CDN body image, and records every missing or failed post for isolated retries. It starts at a 10-second page cadence and applies escalating in-crawl cooldowns when Substack returns HTTP 429.
 - `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Linked-page and subdomain scopes stay on the seed hostname; prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
 - `Depth`: link traversal depth. Broad scopes use `All`.
 - `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
@@ -28,9 +28,9 @@ The capture form creates Browsertrix jobs. Useful fields:
 - `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
 - `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
 
-Public captures use unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access.
+Public captures expose a read-only publication catalog plus unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access. Owners and admins can change an existing site's visibility from its publication index; management and retry controls never appear in the public catalog.
 
-Site pages paginate the complete post index and search titles, URLs, summaries, and full captured post text.
+Site pages use server-side pagination for the complete post index. Owners and admins can filter successful and failed URLs, retry all or individual failures, and re-grab any successful post as a replacement capture. Full captured post text remains searchable from the item index.
 
 ## Cookies
 

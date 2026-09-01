@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +71,10 @@ func (a *App) Routes() http.Handler {
 
 	apiRouter := chi.NewRouter()
 	apiRouter.Use(a.authMiddleware)
+	apiRouter.Get("/api/sites/{id}/pages", a.ListSiteIndex)
+	apiRouter.Put("/api/sites/{id}/visibility", a.UpdateSiteVisibility)
+	apiRouter.Post("/api/sites/{id}/retry-failed", a.RetryFailedSitePages)
+	apiRouter.Post("/api/sites/{id}/retry-page", a.RetryFailedSitePage)
 	api.HandlerFromMux(a, apiRouter)
 	root.Mount("/", apiRouter)
 
@@ -91,6 +96,10 @@ func (a *App) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		user, err := a.authenticate(r)
+		if err != nil && publicCatalogReadPath(r.Method, r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if err != nil && publicWarcReadPath(r.URL.Path) {
 			id, ok := warcIDFromReadPath(r.URL.Path)
 			if ok {
@@ -107,6 +116,13 @@ func (a *App) authMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+func publicCatalogReadPath(method, path string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	return path == "/api/sites" || strings.HasPrefix(path, "/api/sites/") || path == "/api/items" || strings.HasPrefix(path, "/api/items/")
 }
 
 func publicWarcReadPath(path string) bool {
@@ -582,6 +598,199 @@ func (a *App) DeleteSite(w http.ResponseWriter, r *http.Request, id api.Id) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type siteIndexEntry struct {
+	Status string    `json:"status"`
+	URL    string    `json:"url"`
+	Error  string    `json:"error,omitempty"`
+	Item   *api.Item `json:"item,omitempty"`
+}
+
+func (a *App) ListSiteIndex(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	user, _ := userFromContext(r.Context())
+	site, err := a.store.GetSiteVisible(r.Context(), id, user)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	canManage, err := a.store.CanManageSite(r.Context(), id, user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items, err := a.store.ListItemsForSiteVisible(r.Context(), id, user, 5000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	entries := make([]siteIndexEntry, 0, len(items))
+	for i := range items {
+		item := apiItem(&items[i])
+		entries = append(entries, siteIndexEntry{Status: "succeeded", URL: items[i].URL, Item: &item})
+	}
+	if canManage {
+		failures, err := a.store.ListSiteFailures(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, failure := range failures {
+			entries = append(entries, siteIndexEntry{Status: "failed", URL: failure.URL, Error: failure.Error})
+		}
+	}
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	filtered := entries[:0]
+	for _, entry := range entries {
+		if status == "failed" && entry.Status != "failed" || status == "succeeded" && entry.Status != "succeeded" {
+			continue
+		}
+		haystack := strings.ToLower(entry.URL + "\n" + entry.Error)
+		if entry.Item != nil {
+			haystack += "\n" + entry.Item.Title
+			if entry.Item.Summary != nil {
+				haystack += "\n" + *entry.Item.Summary
+			}
+		}
+		if query != "" && !strings.Contains(haystack, query) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].URL < filtered[j].URL })
+	total := len(filtered)
+	limitValue := parseIntDefault(r.URL.Query().Get("limit"), 20)
+	limit := boundedLimit(&limitValue, 20, 100)
+	offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	visibility, _ := a.store.SiteVisibility(r.Context(), id)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"site": apiSite(site), "pages": filtered[offset:end], "total": total,
+		"limit": limit, "offset": offset, "canManage": canManage, "visibility": visibility,
+	})
+}
+
+func parseIntDefault(raw string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func (a *App) UpdateSiteVisibility(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	user, _ := userFromContext(r.Context())
+	canManage, err := a.store.CanManageSite(r.Context(), id, user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !canManage {
+		writeError(w, http.StatusForbidden, "site owner or admin required")
+		return
+	}
+	var req struct {
+		Visibility string `json:"visibility"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.store.UpdateSiteVisibility(r.Context(), id, req.Visibility); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"siteId": id, "visibility": normalizeVisibility(req.Visibility)})
+}
+
+func (a *App) queueSiteFailureRetry(ctx context.Context, user *UserRecord, failure SiteFailureRecord) (*ArchiveJobRecord, error) {
+	original, err := a.store.GetArchiveJob(ctx, failure.JobID)
+	if err != nil {
+		return nil, err
+	}
+	visibility, _ := a.store.SiteVisibility(ctx, failure.SiteID)
+	userID := ""
+	if user != nil {
+		userID = user.ID
+	}
+	return a.store.CreateArchiveJob(ctx, userID, ArchiveJobCreate{
+		URL: failure.URL, Scope: "single_page", Depth: 0, MaxPages: 1,
+		CookieProfileID: nullString(original.CookieProfileID), Visibility: visibility, Enrich: original.Enrich,
+	})
+}
+
+func (a *App) RetryFailedSitePage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	user, _ := userFromContext(r.Context())
+	canManage, err := a.store.CanManageSite(r.Context(), id, user)
+	if err != nil || !canManage {
+		writeError(w, http.StatusForbidden, "site owner or admin required")
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	failures, err := a.store.ListSiteFailures(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, failure := range failures {
+		if normalizeURL(failure.URL) != normalizeURL(req.URL) {
+			continue
+		}
+		job, err := a.queueSiteFailureRetry(r.Context(), user, failure)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusAccepted, apiArchiveJob(job))
+		return
+	}
+	writeError(w, http.StatusNotFound, "failed page not found")
+}
+
+func (a *App) RetryFailedSitePages(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	user, _ := userFromContext(r.Context())
+	canManage, err := a.store.CanManageSite(r.Context(), id, user)
+	if err != nil || !canManage {
+		writeError(w, http.StatusForbidden, "site owner or admin required")
+		return
+	}
+	failures, err := a.store.ListSiteFailures(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jobs := make([]api.ArchiveJob, 0, len(failures))
+	for _, failure := range failures {
+		job, err := a.queueSiteFailureRetry(r.Context(), user, failure)
+		if err == nil {
+			jobs = append(jobs, apiArchiveJob(job))
+		}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"queued": len(jobs), "jobs": jobs})
 }
 
 func (a *App) ListItems(w http.ResponseWriter, r *http.Request, params api.ListItemsParams) {

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +23,7 @@ const (
 	defaultCapturePageRetries = 3
 	rateLimitRetryBaseDelay   = 30 * time.Second
 	rateLimitRetryMaxDelay    = 5 * time.Minute
-	substackMinPageDelay      = 60
+	substackMinPageDelay      = 10
 )
 
 func (a *App) StartWorkers(ctx context.Context, n int) {
@@ -107,6 +108,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	var explicit []string
 	_ = json.Unmarshal([]byte(job.URLsJSON), &explicit)
 	isSubstackMode := job.Scope == "substack"
+	validateSubstackImages := isSubstackMode || isSubstackPostURL(job.URL)
 	captureStartURL := job.URL
 	captureScope := job.Scope
 	captureDepth := job.Depth
@@ -168,28 +170,38 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	useSitemap := a.captureSettingBool(jobCtx, "capture_use_sitemap", "CAPTURE_USE_SITEMAP", true)
 	jobLog("info", fmt.Sprintf("capture pacing: %ds page delay, %d page retries", pageDelay, pageRetries))
 
+	type imageCaptureCheck struct{ Required, Loaded, Failed int }
+	imageChecks := map[string]imageCaptureCheck{}
+	imageCheckRx := regexp.MustCompile(`body image capture required=(\d+) loaded=(\d+) failed=(\d+) page=(https?://\S+)`)
 	onCaptureLog := func(level, message string) {
+		if match := imageCheckRx.FindStringSubmatch(message); len(match) == 5 {
+			required, _ := strconv.Atoi(match[1])
+			loaded, _ := strconv.Atoi(match[2])
+			failed, _ := strconv.Atoi(match[3])
+			imageChecks[normalizeURL(match[4])] = imageCaptureCheck{Required: required, Loaded: loaded, Failed: failed}
+		}
 		jobLog(level, message)
 		_ = a.store.UpdateJobMessage(context.Background(), job.ID, message)
 	}
 	captureOptions := BrowsertrixCaptureOptions{
-		JobID:         job.ID,
-		StartURL:      captureStartURL,
-		ExplicitURLs:  explicit,
-		Scope:         captureScope,
-		Depth:         captureDepth,
-		MaxPages:      captureMaxPages,
-		Prefix:        nullString(job.Prefix),
-		PathExcludeRx: nullString(job.PathExcludeRx),
-		UserAgent:     userAgent,
-		Cookies:       browserCookies,
-		BlockAds:      a.filter != nil,
-		Headless:      captureHeadless,
-		PageDelay:     pageDelay,
-		PageRetries:   pageRetries,
-		UseSitemap:    useSitemap,
-		SubstackMode:  isSubstackMode,
-		OnLog:         onCaptureLog,
+		JobID:                  job.ID,
+		StartURL:               captureStartURL,
+		ExplicitURLs:           explicit,
+		Scope:                  captureScope,
+		Depth:                  captureDepth,
+		MaxPages:               captureMaxPages,
+		Prefix:                 nullString(job.Prefix),
+		PathExcludeRx:          nullString(job.PathExcludeRx),
+		UserAgent:              userAgent,
+		Cookies:                browserCookies,
+		BlockAds:               a.filter != nil,
+		Headless:               captureHeadless,
+		PageDelay:              pageDelay,
+		PageRetries:            pageRetries,
+		UseSitemap:             useSitemap,
+		SubstackMode:           isSubstackMode,
+		ValidateSubstackImages: validateSubstackImages,
+		OnLog:                  onCaptureLog,
 	}
 
 	result, err := a.captureWithRateLimitBackoff(jobCtx, captureOptions, jobLog)
@@ -278,6 +290,19 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			}
 			continue
 		}
+		if validateSubstackImages && isSubstackPostURL(page.URL) {
+			check, ok := imageChecks[normalizeURL(page.URL)]
+			if !ok {
+				jobLog("warn", fmt.Sprintf("skip captured page %s: Substack body image validation did not complete", page.URL))
+				retryURLs = append(retryURLs, page.URL)
+				continue
+			}
+			if check.Failed > 0 || check.Loaded < check.Required {
+				jobLog("warn", fmt.Sprintf("skip captured page %s: %d/%d required Substack body images failed to load", page.URL, check.Failed, check.Required))
+				retryURLs = append(retryURLs, page.URL)
+				continue
+			}
+		}
 		item, err := a.store.CreateItem(jobCtx, ItemRecord{
 			JobID:        job.ID,
 			CaptureID:    capture.ID,
@@ -296,6 +321,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			jobLog("error", "failed to index item: "+err.Error())
 			continue
 		}
+		_ = a.store.ClearSiteFailure(jobCtx, site.ID, page.URL)
 		mdPath := a.store.MarkdownPath(capture.ID, item.ID)
 		if err := os.MkdirAll(filepath.Dir(mdPath), 0o755); err != nil {
 			jobLog("error", "failed to create markdown dir: "+err.Error())
@@ -313,6 +339,20 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			}
 		}
 		indexed++
+	}
+
+	if isSubstackMode {
+		seenFailures := map[string]bool{}
+		for _, rawURL := range retryURLs {
+			normalized := normalizeURL(rawURL)
+			if normalized == "" || seenFailures[normalized] {
+				continue
+			}
+			seenFailures[normalized] = true
+			if err := a.store.RecordSiteFailure(jobCtx, site.ID, job.ID, rawURL, "missing, failed, rate-limited, or incomplete capture"); err != nil {
+				jobLog("error", fmt.Sprintf("failed to record failed page %s: %v", rawURL, err))
+			}
+		}
 	}
 
 	if indexed == 0 {
