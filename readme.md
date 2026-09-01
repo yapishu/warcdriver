@@ -48,7 +48,7 @@ Recommended flow:
 4. Add a WARCdriver cookie profile with source `JSON` and an optional host label.
 5. Select that profile when capturing.
 
-Cookie profiles are stored in SQLite under `DATA_DIR`. WACZ/WARC output is not scrubbed after capture, so authenticated captures may contain sensitive request or response data.
+Cookie profiles are stored in SQLite under `DATA_DIR`. The pinned Browsertrix recorder is hardened at image-build time to omit `Cookie`, `Set-Cookie`, `Authorization`, and `Proxy-Authorization` HTTP fields before WARC serialization, so saved and publicly shared WACZ files do not disclose capture credentials. This protection applies to new captures; archives produced by older WARCdriver builds should be treated as sensitive.
 
 ## API
 
