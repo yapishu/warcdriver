@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,7 +88,17 @@ type SiteRecord struct {
 	ID        string
 	Host      string
 	Title     sql.NullString
+	Summary   sql.NullString
 	ItemCount int
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type SiteFailureRecord struct {
+	SiteID    string
+	JobID     string
+	URL       string
+	Error     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -216,6 +227,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			host TEXT NOT NULL UNIQUE,
 			title TEXT,
+			summary TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -245,10 +257,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			status_code INTEGER,
 			content_type TEXT,
 			markdown_path TEXT,
+			search_text TEXT,
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_site_created ON items(site_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_capture ON items(capture_id)`,
+		`CREATE TABLE IF NOT EXISTS site_failures (
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			job_id TEXT NOT NULL REFERENCES archive_jobs(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			error TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(site_id, url)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_site_failures_site_updated ON site_failures(site_id, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS job_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id TEXT NOT NULL REFERENCES archive_jobs(id) ON DELETE CASCADE,
@@ -266,6 +289,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureItemsSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSitesSchema(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureArchiveJobsSchema(ctx); err != nil {
@@ -400,10 +426,27 @@ func (s *Store) ensureItemsSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := cols["replayable"]; ok {
-		return nil
+	if _, ok := cols["replayable"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return err
+		}
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1`)
+	if _, ok := cols["search_text"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN search_text TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureSitesSchema(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "sites")
+	if err != nil {
+		return err
+	}
+	if _, ok := cols["summary"]; !ok {
+		_, err = s.db.ExecContext(ctx, `ALTER TABLE sites ADD COLUMN summary TEXT`)
+	}
 	return err
 }
 
@@ -638,7 +681,7 @@ func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 		"user_agent":           getenv("CAPTURE_USER_AGENT", ""),
 		"capture_headless":     getenv("CAPTURE_HEADLESS", "false"),
 		"capture_page_delay":   getenv("CAPTURE_PAGE_DELAY", "3"),
-		"capture_page_retries": getenv("CAPTURE_PAGE_RETRIES", "0"),
+		"capture_page_retries": getenv("CAPTURE_PAGE_RETRIES", strconv.Itoa(defaultCapturePageRetries)),
 		"capture_use_sitemap":  getenv("CAPTURE_USE_SITEMAP", "true"),
 	}
 	for k, v := range defaults {
@@ -646,7 +689,33 @@ func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.migrateCapturePageRetriesDefault(ctx)
+}
+
+func (s *Store) migrateCapturePageRetriesDefault(ctx context.Context) error {
+	const migrationKey = "capture_page_retries_default_v2"
+	var applied string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, migrationKey).Scan(&applied)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ? AND value = ?`,
+		strconv.Itoa(defaultCapturePageRetries), "capture_page_retries", "0"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?)`, migrationKey, "true"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UserCount(ctx context.Context) (int, error) {
@@ -1025,6 +1094,17 @@ func (s *Store) GetArchiveJob(ctx context.Context, id string) (*ArchiveJobRecord
 	return scanArchiveJob(row)
 }
 
+func (s *Store) FindActiveArchiveJob(ctx context.Context, rawURL, scope string) (*ArchiveJobRecord, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM archive_jobs
+		WHERE url = ? AND scope = ? AND status IN (?, ?)
+		ORDER BY created_at DESC LIMIT 1`, rawURL, scope, StatusQueued, StatusRunning).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetArchiveJob(ctx, id)
+}
+
 func (s *Store) ListArchiveJobs(ctx context.Context, limit int) ([]ArchiveJobRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, url, urls_json, scope, depth, max_pages, prefix, path_exclude_rx, cookie_profile_id,
 			visibility, use_browser_profile, enrich, status, status_message, error, capture_id, replace_item_id, created_at, started_at, finished_at
@@ -1195,16 +1275,19 @@ func (s *Store) ListJobLogs(ctx context.Context, jobID string) ([]JobLogRecord, 
 	return out, rows.Err()
 }
 
-func (s *Store) UpsertSite(ctx context.Context, host, title string) (*SiteRecord, error) {
+func (s *Store) UpsertSite(ctx context.Context, host, title, summary string) (*SiteRecord, error) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
 		return nil, fmt.Errorf("empty host")
 	}
 	now := time.Now().UTC()
 	id := uuid.NewString()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sites(id, host, title, created_at, updated_at) VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(host) DO UPDATE SET title = COALESCE(NULLIF(excluded.title, ''), sites.title), updated_at = excluded.updated_at`,
-		id, host, title, formatTime(now), formatTime(now))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sites(id, host, title, summary, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(host) DO UPDATE SET
+			title = COALESCE(NULLIF(sites.title, ''), excluded.title),
+			summary = COALESCE(NULLIF(sites.summary, ''), excluded.summary),
+			updated_at = excluded.updated_at`,
+		id, host, title, summary, formatTime(now), formatTime(now))
 	if err != nil {
 		return nil, err
 	}
@@ -1212,20 +1295,20 @@ func (s *Store) UpsertSite(ctx context.Context, host, title string) (*SiteRecord
 }
 
 func (s *Store) GetSiteByHost(ctx context.Context, host string) (*SiteRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s LEFT JOIN items i ON i.site_id = s.id WHERE s.host = ? GROUP BY s.id`, strings.ToLower(host))
 	return scanSite(row)
 }
 
 func (s *Store) GetSite(ctx context.Context, id string) (*SiteRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s LEFT JOIN items i ON i.site_id = s.id WHERE s.id = ? GROUP BY s.id`, id)
 	return scanSite(row)
 }
 
 func (s *Store) GetSiteVisible(ctx context.Context, id string, user *UserRecord) (*SiteRecord, error) {
 	userID, isAdmin := accessArgs(user)
-	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s
 		JOIN items i ON i.site_id = s.id
 		JOIN captures c ON c.id = i.capture_id
@@ -1249,8 +1332,93 @@ func (s *Store) DeleteSite(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) SiteVisibility(ctx context.Context, siteID string) (string, error) {
+	var total, public int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), COALESCE(sum(CASE WHEN visibility = 'public' THEN 1 ELSE 0 END), 0)
+		FROM captures WHERE site_id = ?`, siteID).Scan(&total, &public)
+	if err != nil {
+		return VisibilityPrivate, err
+	}
+	if total > 0 && total == public {
+		return VisibilityPublic, nil
+	}
+	return VisibilityPrivate, nil
+}
+
+func (s *Store) CanManageSite(ctx context.Context, siteID string, user *UserRecord) (bool, error) {
+	if user == nil {
+		return false, nil
+	}
+	if user.IsAdmin {
+		return true, nil
+	}
+	var total, owned int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), COALESCE(sum(CASE WHEN owner_user_id = ? THEN 1 ELSE 0 END), 0)
+		FROM captures WHERE site_id = ?`, user.ID, siteID).Scan(&total, &owned)
+	return total > 0 && total == owned, err
+}
+
+func (s *Store) UpdateSiteVisibility(ctx context.Context, siteID, visibility string) error {
+	visibility = normalizeVisibility(visibility)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE captures SET visibility = ? WHERE site_id = ?`, visibility, siteID)
+	if err != nil {
+		return err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE archive_jobs SET visibility = ? WHERE capture_id IN (SELECT id FROM captures WHERE site_id = ?)`, visibility, siteID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RecordSiteFailure(ctx context.Context, siteID, jobID, rawURL, failure string) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO site_failures(site_id, job_id, url, error, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(site_id, url) DO UPDATE SET job_id = excluded.job_id, error = excluded.error, updated_at = excluded.updated_at`,
+		siteID, jobID, rawURL, failure, now, now)
+	return err
+}
+
+func (s *Store) ClearSiteFailure(ctx context.Context, siteID, rawURL string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM site_failures WHERE site_id = ? AND url = ?`, siteID, rawURL)
+	return err
+}
+
+func (s *Store) ListSiteFailures(ctx context.Context, siteID string) ([]SiteFailureRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT site_id, job_id, url, error, created_at, updated_at
+		FROM site_failures WHERE site_id = ? ORDER BY url`, siteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SiteFailureRecord{}
+	for rows.Next() {
+		var rec SiteFailureRecord
+		var created, updated string
+		if err := rows.Scan(&rec.SiteID, &rec.JobID, &rec.URL, &rec.Error, &created, &updated); err != nil {
+			return nil, err
+		}
+		rec.CreatedAt, _ = parseTime(created)
+		rec.UpdatedAt, _ = parseTime(updated)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListSites(ctx context.Context, limit int) ([]SiteRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s LEFT JOIN items i ON i.site_id = s.id GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1269,7 +1437,7 @@ func (s *Store) ListSites(ctx context.Context, limit int) ([]SiteRecord, error) 
 
 func (s *Store) ListSitesVisible(ctx context.Context, user *UserRecord, limit int) ([]SiteRecord, error) {
 	userID, isAdmin := accessArgs(user)
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, count(i.id), s.created_at, s.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.host, s.title, s.summary, count(i.id), s.created_at, s.updated_at
 		FROM sites s
 		JOIN items i ON i.site_id = s.id
 		JOIN captures c ON c.id = i.capture_id
@@ -1294,7 +1462,7 @@ func (s *Store) ListSitesVisible(ctx context.Context, user *UserRecord, limit in
 func scanSite(row interface{ Scan(dest ...any) error }) (*SiteRecord, error) {
 	var rec SiteRecord
 	var created, updated string
-	if err := row.Scan(&rec.ID, &rec.Host, &rec.Title, &rec.ItemCount, &created, &updated); err != nil {
+	if err := row.Scan(&rec.ID, &rec.Host, &rec.Title, &rec.Summary, &rec.ItemCount, &created, &updated); err != nil {
 		return nil, err
 	}
 	var err error
@@ -1436,6 +1604,11 @@ func (s *Store) SetItemMarkdownPath(ctx context.Context, itemID, path string) er
 	return err
 }
 
+func (s *Store) SetItemSearchText(ctx context.Context, itemID, text string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE items SET search_text = ? WHERE id = ?`, text, itemID)
+	return err
+}
+
 func (s *Store) UpdateItemEnrichment(ctx context.Context, itemID, summary string, tags []string) error {
 	rawTags, err := json.Marshal(tags)
 	if err != nil {
@@ -1484,9 +1657,9 @@ func (s *Store) ListItems(ctx context.Context, siteID, query string, limit int) 
 		args = append(args, siteID)
 	}
 	if strings.TrimSpace(query) != "" {
-		where = append(where, "(url LIKE ? OR title LIKE ? OR summary LIKE ?)")
+		where = append(where, "(url LIKE ? OR title LIKE ? OR summary LIKE ? OR search_text LIKE ?)")
 		q := "%" + strings.TrimSpace(query) + "%"
-		args = append(args, q, q, q)
+		args = append(args, q, q, q, q)
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, capture_id, site_id, url, canonical_url, title, summary, tags_json,
@@ -1515,9 +1688,9 @@ func (s *Store) ListItemsVisible(ctx context.Context, user *UserRecord, siteID, 
 		args = append(args, siteID)
 	}
 	if strings.TrimSpace(query) != "" {
-		where = append(where, "(i.url LIKE ? OR i.title LIKE ? OR i.summary LIKE ?)")
+		where = append(where, "(i.url LIKE ? OR i.title LIKE ? OR i.summary LIKE ? OR i.search_text LIKE ?)")
 		q := "%" + strings.TrimSpace(query) + "%"
-		args = append(args, q, q, q)
+		args = append(args, q, q, q, q)
 	}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.job_id, i.capture_id, i.site_id, i.url, i.canonical_url, i.title, i.summary, i.tags_json,

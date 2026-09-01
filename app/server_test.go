@@ -92,6 +92,116 @@ func TestNormalizeArchiveJobRejectsBadPathExcludeRegex(t *testing.T) {
 	}
 }
 
+func TestNormalizeArchiveJobSubstackModeUsesPublicationHomepage(t *testing.T) {
+	scope := api.Substack
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://Publication.Substack.com/p/post?utm_source=x", Scope: &scope}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://publication.substack.com/" || got.Scope != "substack" || got.Depth != 0 || got.MaxPages != 0 {
+		t.Fatalf("normalized Substack job = %+v", got)
+	}
+	if got.PathExcludeRx != substackCommentExcludeRx {
+		t.Fatalf("path exclude = %q", got.PathExcludeRx)
+	}
+}
+
+func TestSiteVisibilityAndFailureCatalog(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateArchiveJob(ctx, "", ArchiveJobCreate{
+		URL: "https://publication.substack.com/", Scope: "substack", Visibility: VisibilityPrivate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := store.UpsertSite(ctx, "publication.substack.com", "Publication", "Summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateCapture(ctx, job.ID, site.ID, "", job.URL, "Publication", filepath.Join(t.TempDir(), "capture.wacz"), VisibilityPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.SiteVisibility(ctx, site.ID); err != nil || got != VisibilityPrivate {
+		t.Fatalf("initial visibility = %q, err=%v", got, err)
+	}
+	if err := store.UpdateSiteVisibility(ctx, site.ID, VisibilityPublic); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.SiteVisibility(ctx, site.ID); err != nil || got != VisibilityPublic {
+		t.Fatalf("updated visibility = %q, err=%v", got, err)
+	}
+	failedURL := "https://publication.substack.com/p/failed"
+	if err := store.RecordSiteFailure(ctx, site.ID, job.ID, failedURL, "HTTP 429"); err != nil {
+		t.Fatal(err)
+	}
+	failures, err := store.ListSiteFailures(ctx, site.ID)
+	if err != nil || len(failures) != 1 || failures[0].URL != failedURL {
+		t.Fatalf("failures = %#v, err=%v", failures, err)
+	}
+	if err := store.ClearSiteFailure(ctx, site.ID, failedURL); err != nil {
+		t.Fatal(err)
+	}
+	failures, err = store.ListSiteFailures(ctx, site.ID)
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("cleared failures = %#v, err=%v", failures, err)
+	}
+}
+
+func TestReplayUIAssetIsAvailableWithoutAuthentication(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/warcs/ui.js", nil)
+	rec := httptest.NewRecorder()
+
+	(&App{}).Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/javascript; charset=utf-8" {
+		t.Fatalf("content type = %q", got)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("expected embedded replay UI JavaScript")
+	}
+}
+
+func TestCapturePageRetriesDefaultMigration(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, "capture_page_retries_default_v2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSetting(ctx, "capture_page_retries", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateCapturePageRetriesDefault(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetSetting(ctx, "capture_page_retries"); err != nil || got != "3" {
+		t.Fatalf("capture_page_retries = %q, err = %v; want 3", got, err)
+	}
+
+	if err := store.SetSetting(ctx, "capture_page_retries", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateCapturePageRetriesDefault(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetSetting(ctx, "capture_page_retries"); err != nil || got != "0" {
+		t.Fatalf("explicit post-migration retry setting = %q, err = %v; want 0", got, err)
+	}
+}
+
 func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -128,7 +238,7 @@ func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	site, err := store.UpsertSite(ctx, "example.com", "Example")
+	site, err := store.UpsertSite(ctx, "example.com", "Example", "Example site")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,5 +286,59 @@ func TestRecaptureItemQueuesReplacementJob(t *testing.T) {
 	}
 	if queued.Visibility != VisibilityPublic || queued.Enrich {
 		t.Fatalf("visibility/enrich = %s/%v, want public/false", queued.Visibility, queued.Enrich)
+	}
+}
+
+func TestQueuePageRetriesCreatesDeduplicatedSinglePageJobs(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := OpenStore(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	user, err := store.CreateUser(ctx, UserCreate{
+		Username:     "retry-owner",
+		DisplayName:  "Retry Owner",
+		PasswordHash: "hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.CreateArchiveJob(ctx, user.ID, ArchiveJobCreate{
+		URL:        "https://publication.substack.com/",
+		Scope:      "same_subdomain",
+		Depth:      -1,
+		Visibility: VisibilityPrivate,
+		Enrich:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{store: store, dataDir: dataDir}
+	app.queuePageRetries(ctx, parent, []string{
+		"https://publication.substack.com/p/one",
+		"https://publication.substack.com/p/one",
+		"https://publication.substack.com/p/two",
+	}, func(string, string) {})
+
+	jobs, err := store.ListArchiveJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 3 {
+		t.Fatalf("jobs = %d, want parent plus 2 retries", len(jobs))
+	}
+	for _, job := range jobs {
+		if job.ID == parent.ID {
+			continue
+		}
+		if job.Scope != "single_page" || job.Depth != 0 || job.MaxPages != 1 {
+			t.Fatalf("retry job scope/depth/maxPages = %s/%d/%d", job.Scope, job.Depth, job.MaxPages)
+		}
+		if !job.UserID.Valid || job.UserID.String != user.ID || job.Visibility != VisibilityPrivate || !job.Enrich {
+			t.Fatalf("retry job did not preserve ownership/options: %+v", job)
+		}
 	}
 }

@@ -19,15 +19,19 @@ Open `http://localhost:8808/` and log in with the bootstrap admin account.
 The capture form creates Browsertrix jobs. Useful fields:
 
 - `URL`: seed URL.
-- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
+- `Substack mode`: reads the complete `/p/...` post list from the publication sitemap, captures the homepage only for publication metadata, excludes comment routes, explicitly verifies each Substack-CDN body image, and records every missing or failed post for isolated retries. It starts at a 10-second page cadence and applies escalating in-crawl cooldowns when Substack returns HTTP 429.
+- `Incremental Substack updates`: publication owners can use **Check for new posts** from the publication index. WARCdriver diffs the current sitemap against indexed and canonical post URLs, then captures only new or previously missing posts with the site's saved cookies, visibility, validation, retry, and cooldown settings.
+- `Scope`: `single_page`, `linked_pages`, `same_subdomain`, `prefix`, or `explicit_urls`. Linked-page and subdomain scopes stay on the seed hostname; prefix scope crawls only page URLs that start with the seed URL or optional prefix URL.
 - `Depth`: link traversal depth. Broad scopes use `All`.
 - `Max pages`: set to `0` or check `Unlimited` for no page-count cap.
-- `Path exclude regex`: a regular expression matched against candidate URL paths after scope matching, before pages are queued, for example `^/(login|cart)(?:/|$)` or `^/p/[^/]+/comment(?:/|$)`.
+- `Path exclude regex`: a regular expression matched against candidate URL paths after scope matching, before pages are queued. Substack URLs automatically use `^/p/[^/]+/comments?(?:/|$)` to reject both `/comments` indexes and `/comment/<id>` permalinks. Another example is `^/(login|cart)(?:/|$)`.
 - `Cookies`: optional saved cookie profile.
 - `Visibility`: `Private` is owner/admin only; `Public` can be replayed by anyone with the viewer link.
 - `Enrich`: sends markdown to OpenRouter for English summaries and tags when configured.
 
-Public captures use unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access.
+Public captures expose a read-only publication catalog plus unauthenticated viewer and WACZ metadata/download routes. Private captures require login and owner/admin access. Owners and admins can change an existing site's visibility from its publication index; management and retry controls never appear in the public catalog.
+
+Site pages use server-side pagination for the complete post index. Owners and admins can filter successful and failed URLs, retry all or individual failures, and re-grab any successful post as a replacement capture. Full captured post text remains searchable from the item index.
 
 ## Cookies
 
@@ -45,7 +49,7 @@ Recommended flow:
 4. Add a WARCdriver cookie profile with source `JSON` and an optional host label.
 5. Select that profile when capturing.
 
-Cookie profiles are stored in SQLite under `DATA_DIR`. WACZ/WARC output is not scrubbed after capture, so authenticated captures may contain sensitive request or response data.
+Cookie profiles are stored in SQLite under `DATA_DIR`. The pinned Browsertrix recorder is hardened at image-build time to omit `Cookie`, `Set-Cookie`, `Authorization`, and `Proxy-Authorization` HTTP fields before WARC serialization, so saved and publicly shared WACZ files do not disclose capture credentials. This protection applies to new captures; archives produced by older WARCdriver builds should be treated as sensitive.
 
 ## API
 
@@ -87,7 +91,7 @@ Admin users can manage accounts at `/api/users` and from the Users screen. There
 | `CAPTURE_USER_AGENT` | empty | Optional Browsertrix user-agent override. |
 | `CAPTURE_HEADLESS` | `false` | Browsertrix browser mode default. `false` uses headed mode under Xvfb. |
 | `CAPTURE_PAGE_DELAY` | `3` | Seconds Browsertrix waits between pages. |
-| `CAPTURE_PAGE_RETRIES` | `0` | Browsertrix page retry count. |
+| `CAPTURE_PAGE_RETRIES` | `3` | Retry count for browser load failures and HTTP 429 responses. Rate-limited pages are retried in isolated jobs with exponential backoff starting at 30 seconds. |
 | `CAPTURE_USE_SITEMAP` | `true` | Enables sitemap discovery for broad uncapped crawls. |
 | `BROWSERTRIX_QUEUE_DIR` | `/data/browsertrix/jobs` | Sidecar job queue directory. |
 | `BROWSERTRIX_RUNS_DIR` | `/data/browsertrix/runs` | Browsertrix output directory. |

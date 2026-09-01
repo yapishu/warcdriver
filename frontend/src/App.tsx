@@ -312,7 +312,8 @@ function scopeLabel(scope: ArchiveScope | string) {
     linked_pages: "Linked pages",
     same_subdomain: "Subdomain",
     prefix: "Prefix",
-    explicit_urls: "Explicit URLs"
+    explicit_urls: "Explicit URLs",
+    substack: "Substack"
   };
   return labels[scope] || scope.replace(/_/g, " ");
 }
@@ -454,6 +455,18 @@ export function App() {
 
   if (route.name === "viewer") return <ReplayPage id={route.id} />;
   if (boot.state === "loading") return <BootScreen />;
+  if (boot.state !== "ready" && (route.name === "sites" || route.name === "site")) {
+    return (
+      <div className="app-shell public-catalog-shell">
+        <aside className="sidebar">
+          <a className="wordmark" href={href("sites")}><span className="wordmark-icon"><Archive size={19} /></span><span>WARCdriver</span></a>
+          <nav className="side-nav"><a className="active" href={href("sites")}><Library size={17} />Public archives</a></nav>
+          <a className="ghost-button sidebar-logout" href={href("")}><KeyRound size={16} />Owner login</a>
+        </aside>
+        <div className="workspace"><main className="page"><Page route={route} /></main></div>
+      </div>
+    );
+  }
   if (boot.state !== "ready") return <LoginScreen onLogin={onLogin} />;
 
   return (
@@ -608,9 +621,13 @@ function Frame({
 }
 
 function CaptureDock() {
+  const substackCommentExcludeRx = "^/p/[^/]+/comments?(?:/|$)";
   const [profiles, setProfiles] = useState<CookieProfile[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [url, setURL] = useState("");
+  const [pathExcludeRx, setPathExcludeRx] = useState("");
+  const [cookieProfileID, setCookieProfileID] = useState("");
   const [scope, setScope] = useState<ArchiveScope>("single_page");
   const [depth, setDepth] = useState(0);
   const [unlimitedPages, setUnlimitedPages] = useState(false);
@@ -642,15 +659,18 @@ function CaptureDock() {
       enrich: form.get("enrich") === "on"
     };
     const prefix = String(form.get("prefix") || "").trim();
-    const pathExcludeRx = String(form.get("pathExcludeRx") || "").trim();
+    const submittedPathExcludeRx = String(form.get("pathExcludeRx") || "").trim();
     const cookieProfileId = String(form.get("cookieProfileId") || "").trim();
     if (prefix) payload.prefix = prefix;
-    if (pathExcludeRx) payload.pathExcludeRx = pathExcludeRx;
+    if (submittedPathExcludeRx) payload.pathExcludeRx = submittedPathExcludeRx;
     if (cookieProfileId) payload.cookieProfileId = cookieProfileId;
     try {
       const job = await api.createJob(payload);
       window.location.hash = `/jobs/${job.id}`;
       formEl.reset();
+      setURL("");
+      setPathExcludeRx("");
+      setCookieProfileID("");
       setScope("single_page");
       setDepth(0);
       setUnlimitedPages(false);
@@ -668,13 +688,28 @@ function CaptureDock() {
     if (next === "single_page" || next === "explicit_urls") {
       setDepth(0);
       updateUnlimitedPages(false);
-    } else if (next === "same_subdomain" || next === "prefix") {
+    } else if (next === "same_subdomain" || next === "prefix" || next === "substack") {
       setDepth(-1);
       updateUnlimitedPages(true);
     } else if (depth < 1) {
       setDepth(1);
       updateUnlimitedPages(false);
     }
+  }
+
+  function updateSubstackMode(enabled: boolean) {
+    if (!enabled) {
+      setScope("single_page");
+      setDepth(0);
+      updateUnlimitedPages(false);
+      return;
+    }
+    setScope("substack");
+    setDepth(0);
+    updateUnlimitedPages(true);
+    setPathExcludeRx(substackCommentExcludeRx);
+    const substackProfile = profiles.find((profile) => profile.name.toLowerCase() === "substack");
+    if (substackProfile) setCookieProfileID(substackProfile.id);
   }
 
   function updateUnlimitedPages(next: boolean) {
@@ -703,13 +738,27 @@ function CaptureDock() {
     }
   }
 
+  function updateURL(next: string) {
+    setURL(next);
+    if (!pathExcludeRx && /^https?:\/\/(?:[^./]+\.)?substack\.com(?:[/:?#]|$)/i.test(next.trim())) {
+      setPathExcludeRx(substackCommentExcludeRx);
+    }
+  }
+
   return (
     <header className="capture-dock">
       <form onSubmit={submit} className="capture-form">
         <div className="capture-main-row">
           <label className="url-field">
             URL
-            <input name="url" type="url" placeholder="https://publication.substack.com/p/article" required />
+            <input
+              name="url"
+              type="url"
+              value={url}
+              onChange={(event) => updateURL(event.target.value)}
+              placeholder="https://publication.substack.com/p/article"
+              required
+            />
           </label>
           <button className="primary-button capture-button" disabled={busy}>
             {busy ? <Loader2 className="spin" size={16} /> : <Archive size={16} />}
@@ -717,19 +766,32 @@ function CaptureDock() {
           </button>
         </div>
         <div className="capture-options-row">
-          <label className="scope-field">
-            Scope
-            <select name="scope" value={scope} onChange={(event) => updateScope(event.target.value as ArchiveScope)}>
-              <option value="single_page">Single page</option>
-              <option value="linked_pages">Linked pages</option>
-              <option value="same_subdomain">Subdomain</option>
-              <option value="prefix">URL prefix</option>
-              <option value="explicit_urls">Explicit URLs</option>
-            </select>
+          <label className="check-field" title="Read every exact /p/ post URL from the publication sitemap, exclude comments, and retry missing posts.">
+            <input
+              name="substackMode"
+              type="checkbox"
+              checked={scope === "substack"}
+              onChange={(event) => updateSubstackMode(event.target.checked)}
+            />
+            Substack mode
           </label>
+          {scope !== "substack" ? (
+            <label className="scope-field">
+              Scope
+              <select name="scope" value={scope} onChange={(event) => updateScope(event.target.value as ArchiveScope)}>
+                <option value="single_page">Single page</option>
+                <option value="linked_pages">Linked pages</option>
+                <option value="same_subdomain">Subdomain</option>
+                <option value="prefix">URL prefix</option>
+                <option value="explicit_urls">Explicit URLs</option>
+              </select>
+            </label>
+          ) : (
+            <span className="static-input">Sitemap posts only</span>
+          )}
           <label className="small-field">
             Depth
-            {scope === "same_subdomain" || scope === "prefix" ? (
+            {scope === "same_subdomain" || scope === "prefix" || scope === "substack" ? (
               <span className="static-input">All</span>
             ) : (
               <input
@@ -767,7 +829,7 @@ function CaptureDock() {
           </label>
           <label className="cookie-field">
             Cookies
-            <select name="cookieProfileId" defaultValue="">
+            <select name="cookieProfileId" value={cookieProfileID} onChange={(event) => setCookieProfileID(event.target.value)}>
               <option value="">None</option>
               {profiles.map((profile) => (
                 <option key={profile.id} value={profile.id}>
@@ -797,9 +859,12 @@ function CaptureDock() {
             <input
               name="pathExcludeRx"
               type="text"
-              placeholder="exclude paths, e.g. ^/p/[^/]+/comment(?:/|$)"
+              value={pathExcludeRx}
+              onChange={(event) => setPathExcludeRx(event.target.value)}
+              placeholder="e.g. ^/p/[^/]+/comments?(?:/|$)"
               spellCheck={false}
-              title="Reject candidate page URLs whose path matches this regex after scope matching."
+              title="Reject candidate page URLs whose path matches this regex after scope matching. comments? matches both /comment/<id> and /comments."
+              readOnly={scope === "substack"}
             />
           </label>
           <label className="check-field">
@@ -890,6 +955,10 @@ function JobPage({ id }: { id: string }) {
     await api.deleteJob(id);
     window.location.hash = "/jobs";
   }
+  async function retryJob() {
+    const retry = await api.retryJob(id);
+    window.location.hash = `/jobs/${retry.id}`;
+  }
   return (
     <Resource load={load}>
       {(job) => (
@@ -923,6 +992,12 @@ function JobPage({ id }: { id: string }) {
                   <button className="icon-button" type="button" onClick={cancelJob}>
                     <XCircle size={16} />
                     Cancel
+                  </button>
+                )}
+                {job.status !== "queued" && job.status !== "running" && (
+                  <button className="icon-button" type="button" onClick={retryJob}>
+                    <RefreshCw size={16} />
+                    Retry
                   </button>
                 )}
                 {job.status !== "queued" && job.status !== "running" && (
@@ -1054,37 +1129,142 @@ function SitesPage() {
 }
 
 function SitePage({ id }: { id: string }) {
-  const load = useLoader(() => api.site(id), [id]);
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("all");
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const [refresh, setRefresh] = useState(0);
+  const [checkingNewPosts, setCheckingNewPosts] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
+  const load = useLoader(
+    () => api.siteIndex(id, { status, q: query, limit: pageSize, offset: page * pageSize }),
+    [id, query, status, page, pageSize, refresh]
+  );
   async function deleteSite() {
     await api.deleteSite(id);
     window.location.hash = "/sites";
   }
+  async function retryFailed(url: string) {
+    const job = await api.retryFailedSitePage(id, url);
+    window.location.hash = `/jobs/${job.id}`;
+  }
+  async function retryAllFailed() {
+    await api.retryFailedSitePages(id);
+    setRefresh((value) => value + 1);
+  }
+  async function checkForNewPosts() {
+    setCheckingNewPosts(true);
+    setUpdateMessage("");
+    try {
+      const result = await api.checkSiteForNewPosts(id);
+      if (result.job) {
+        window.location.hash = `/jobs/${result.job.id}`;
+        return;
+      }
+      setUpdateMessage(`Up to date · ${result.totalPosts} sitemap posts`);
+    } catch (error) {
+      setUpdateMessage(error instanceof Error ? error.message : "Could not check the Substack sitemap");
+    } finally {
+      setCheckingNewPosts(false);
+    }
+  }
   return (
     <Resource load={load}>
-      {({ site, items }) => (
+      {(index) => {
+        const { site, pages, total, canManage, visibility } = index;
+        const pageCount = Math.max(1, Math.ceil(total / pageSize));
+        return (
         <>
           <PageHeader
             eyebrow={site.host}
             title={site.title || site.host}
+            subtitle={site.summary}
             aside={
               <div className="action-row">
-                <span>{site.itemCount} items</span>
-                <ConfirmButton
-                  className="danger-button"
-                  title="Delete site"
-                  detail="This removes the site, its captures, and indexed pages from the catalog."
-                  confirmLabel="Delete"
-                  onConfirm={deleteSite}
-                >
-                  <Trash2 size={16} />
-                  Delete
-                </ConfirmButton>
+                <label className="search-box">
+                  <Search size={16} />
+                  <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }} placeholder="Search publication index" />
+                </label>
+                <span>{total} pages</span>
+                {canManage && (
+                  <select aria-label="Site visibility" value={visibility} onChange={async (event) => {
+                    await api.updateSiteVisibility(id, event.target.value as Visibility);
+                    setRefresh((value) => value + 1);
+                  }}>
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                  </select>
+                )}
+                {canManage && (
+                  <ConfirmButton
+                    className="danger-button"
+                    title="Delete site"
+                    detail="This removes the site, its captures, and indexed pages from the catalog."
+                    confirmLabel="Delete"
+                    onConfirm={deleteSite}
+                  >
+                    <Trash2 size={16} />
+                    Delete
+                  </ConfirmButton>
+                )}
               </div>
             }
           />
-          <PaginatedItemPanel title="Pages" items={items} />
+          <Panel
+            title={canManage ? "Publication index" : "Archived posts"}
+            action={
+              <div className="action-row">
+                {canManage && (
+                  <button className="icon-button" type="button" disabled={checkingNewPosts} onClick={checkForNewPosts}>
+                    {checkingNewPosts ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                    {checkingNewPosts ? "Checking sitemap…" : "Check for new posts"}
+                  </button>
+                )}
+                {canManage && updateMessage && <span>{updateMessage}</span>}
+                {canManage && (
+                  <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(0); }} aria-label="Capture status filter">
+                    <option value="all">All statuses</option>
+                    <option value="succeeded">Succeeded</option>
+                    <option value="failed">Failed</option>
+                  </select>
+                )}
+                {canManage && status === "failed" && total > 0 && (
+                  <button className="icon-button" type="button" onClick={retryAllFailed}>
+                    <RefreshCw size={15} /> Retry all failed
+                  </button>
+                )}
+                <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(0); }} aria-label="Rows per page">
+                  <option value="20">20</option><option value="50">50</option><option value="100">100</option>
+                </select>
+                <button className="tiny-button" type="button" disabled={page <= 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Prev</button>
+                <span>{page + 1}/{pageCount} · {total} total</span>
+                <button className="tiny-button" type="button" disabled={page >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>Next</button>
+              </div>
+            }
+          >
+            {!pages.length ? <Empty icon={<FileText size={22} />} label="No matching pages" /> : (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead><tr><th>Status</th><th>Title / URL</th><th>Details</th><th>Actions</th></tr></thead>
+                  <tbody>{pages.map((entry) => (
+                    <tr key={`${entry.status}:${entry.url}`}>
+                      <td><span className={entry.status === "failed" ? "status-pill failed" : "status-pill succeeded"}>{entry.status}</span></td>
+                      <td><strong>{entry.item?.title || entry.url}</strong><span className="subline">{entry.url}</span></td>
+                      <td>{entry.error || entry.item?.summary || "Captured"}</td>
+                      <td><div className="row-actions">
+                        {entry.item?.replayable && <a className="view-button compact-view" href={viewerHref(entry.item.captureId, entry.url)} target="_blank" rel="noreferrer"><Maximize2 size={14} /> View</a>}
+                        {entry.item && <a className="row-link" href={href(`items/${entry.item.id}`)}>Details</a>}
+                        {canManage && entry.item && <RecaptureButton itemID={entry.item.id} compact />}
+                        {canManage && entry.status === "failed" && <button className="icon-button compact-action" type="button" onClick={() => retryFailed(entry.url)}><RefreshCw size={14} /> Retry</button>}
+                      </div></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
         </>
-      )}
+      );}}
     </Resource>
   );
 }
@@ -1646,7 +1826,14 @@ function SettingsForm({ settings, onSaved }: { settings: SettingsType; onSaved: 
           </label>
           <label>
             Page retries
-            <input name="capturePageRetries" type="number" min="0" max="5" defaultValue={settings.capturePageRetries} />
+            <input
+              name="capturePageRetries"
+              type="number"
+              min="0"
+              max="5"
+              defaultValue={settings.capturePageRetries}
+              title="Retry browser load failures and HTTP 429 responses. Rate-limited pages use exponential backoff starting at 30 seconds."
+            />
           </label>
         </div>
         {message && <div className="callout">{message}</div>}
@@ -1930,7 +2117,7 @@ function RecaptureButton({ itemID, compact = false }: { itemID: string; compact?
       aria-label="Recapture item"
     >
       <RefreshCw className={busy ? "spin" : undefined} size={compact ? 14 : 16} />
-      {compact ? "Retry" : "Recapture"}
+      {compact ? "Re-grab" : "Recapture"}
     </button>
   );
 }
@@ -2024,7 +2211,7 @@ function PaginatedSiteGrid({ sites }: { sites: Site[] }) {
               <span>{site.itemCount} items</span>
             </div>
             <h2>{site.title || site.host}</h2>
-            <p>{site.host}</p>
+            <p>{site.summary || site.host}</p>
             <time>{formatDate(site.updatedAt)}</time>
           </a>
         ))}

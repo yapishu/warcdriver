@@ -7,7 +7,7 @@ export type User = {
   createdAt: string;
 };
 
-export type ArchiveScope = "single_page" | "linked_pages" | "same_subdomain" | "prefix" | "explicit_urls";
+export type ArchiveScope = "single_page" | "linked_pages" | "same_subdomain" | "prefix" | "explicit_urls" | "substack";
 export type Visibility = "private" | "public";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -42,9 +42,33 @@ export type Site = {
   id: string;
   host: string;
   title?: string;
+  summary?: string;
   itemCount: number;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SiteIndexEntry = {
+  status: "succeeded" | "failed";
+  url: string;
+  error?: string;
+  item?: Item;
+};
+
+export type SiteIndex = {
+  site: Site;
+  pages: SiteIndexEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  canManage: boolean;
+  visibility: Visibility;
+};
+
+export type SubstackUpdateResult = {
+  newPosts: number;
+  totalPosts: number;
+  job?: ArchiveJob;
 };
 
 export type Item = {

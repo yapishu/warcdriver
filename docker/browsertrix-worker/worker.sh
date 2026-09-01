@@ -5,6 +5,9 @@ QUEUE_DIR="${BROWSERTRIX_QUEUE_DIR:-/data/browsertrix/jobs}"
 RUNS_DIR="${BROWSERTRIX_RUNS_DIR:-/data/browsertrix/runs}"
 POLL_INTERVAL="${BROWSERTRIX_POLL_INTERVAL:-1}"
 GRACE_SECONDS="${BROWSERTRIX_CANCEL_GRACE_SECONDS:-30}"
+SUBSTACK_BACKOFF_BASE="${SUBSTACK_BACKOFF_BASE:-60}"
+SUBSTACK_BACKOFF_MAX="${SUBSTACK_BACKOFF_MAX:-300}"
+SUBSTACK_BACKOFF_DECAY_PAGES="${SUBSTACK_BACKOFF_DECAY_PAGES:-10}"
 
 mkdir -p "$QUEUE_DIR" "$RUNS_DIR"
 echo "warcdriver Browsertrix worker listening: queue=$QUEUE_DIR runs=$RUNS_DIR"
@@ -45,6 +48,11 @@ run_job() {
   pid="$!"
   status="succeeded"
   code=0
+  collection="$(jq -r '.collection // empty' "$config")"
+  pages_file="$RUNS_DIR/collections/$collection/pages/pages.jsonl"
+  seen_page_lines=0
+  throttle_level=0
+  successes_since_throttle=0
 
   while kill -0 "$pid" 2>/dev/null; do
     if [ -f "$job_dir/cancel" ]; then
@@ -61,6 +69,51 @@ run_job() {
         kill -TERM "$pid" 2>/dev/null || true
       fi
       break
+    fi
+
+    if [ -f "$job_dir/substack-mode" ] && [ -f "$pages_file" ]; then
+      page_lines="$(wc -l < "$pages_file" | tr -d ' ')"
+      if [ "$page_lines" -gt "$seen_page_lines" ]; then
+        new_statuses="$(sed -n "$((seen_page_lines + 1)),${page_lines}p" "$pages_file" | jq -r 'select(.url != null) | .status // 0')"
+        seen_page_lines="$page_lines"
+        saw_rate_limit=0
+        successful_pages=0
+        for page_status in $new_statuses; do
+          if [ "$page_status" = "429" ]; then
+            saw_rate_limit=1
+          elif [ "$page_status" -ge 200 ] && [ "$page_status" -lt 400 ]; then
+            successful_pages=$((successful_pages + 1))
+          fi
+        done
+        if [ "$saw_rate_limit" -eq 1 ]; then
+          throttle_level=$((throttle_level + 1))
+          delay="$SUBSTACK_BACKOFF_BASE"
+          level=1
+          while [ "$level" -lt "$throttle_level" ] && [ "$delay" -lt "$SUBSTACK_BACKOFF_MAX" ]; do
+            delay=$((delay * 2))
+            level=$((level + 1))
+          done
+          if [ "$delay" -gt "$SUBSTACK_BACKOFF_MAX" ]; then
+            delay="$SUBSTACK_BACKOFF_MAX"
+          fi
+          successes_since_throttle=0
+          printf '{"timestamp":"%s","logLevel":"warn","context":"worker","message":"Substack HTTP 429 detected; adaptive crawl cooldown for %s seconds (level %s)","details":{}}\n' "$(json_time)" "$delay" "$throttle_level" >> "$log"
+          kill -STOP "$pid" 2>/dev/null || true
+          waited=0
+          while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$delay" ] && [ ! -f "$job_dir/cancel" ]; do
+            sleep 1
+            waited=$((waited + 1))
+          done
+          kill -CONT "$pid" 2>/dev/null || true
+        elif [ "$successful_pages" -gt 0 ] && [ "$throttle_level" -gt 0 ]; then
+          successes_since_throttle=$((successes_since_throttle + successful_pages))
+          if [ "$successes_since_throttle" -ge "$SUBSTACK_BACKOFF_DECAY_PAGES" ]; then
+            throttle_level=$((throttle_level - 1))
+            successes_since_throttle=0
+            printf '{"timestamp":"%s","logLevel":"info","context":"worker","message":"Substack adaptive cooldown decayed to level %s after sustained successful pages","details":{}}\n' "$(json_time)" "$throttle_level" >> "$log"
+          fi
+        fi
+      fi
     fi
     sleep 1
   done

@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeURL(t *testing.T) {
@@ -10,6 +11,25 @@ func TestNormalizeURL(t *testing.T) {
 	want := "https://example.com/path?a=1"
 	if got != want {
 		t.Fatalf("normalizeURL got %q, want %q", got, want)
+	}
+}
+
+func TestRateLimitRetryDelayUsesBoundedExponentialBackoff(t *testing.T) {
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 0, want: 30 * time.Second},
+		{attempt: 1, want: time.Minute},
+		{attempt: 2, want: 2 * time.Minute},
+		{attempt: 3, want: 4 * time.Minute},
+		{attempt: 4, want: 5 * time.Minute},
+		{attempt: 8, want: 5 * time.Minute},
+	}
+	for _, test := range tests {
+		if got := rateLimitRetryDelay(test.attempt); got != test.want {
+			t.Errorf("attempt %d delay = %s, want %s", test.attempt, got, test.want)
+		}
 	}
 }
 
