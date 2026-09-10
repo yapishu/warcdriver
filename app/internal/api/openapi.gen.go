@@ -22,6 +22,7 @@ const (
 const (
 	ExplicitUrls  ArchiveScope = "explicit_urls"
 	LinkedPages   ArchiveScope = "linked_pages"
+	Podcast       ArchiveScope = "podcast"
 	Prefix        ArchiveScope = "prefix"
 	SameSubdomain ArchiveScope = "same_subdomain"
 	SinglePage    ArchiveScope = "single_page"

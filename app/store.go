@@ -1200,6 +1200,13 @@ func (s *Store) FinishJob(ctx context.Context, jobID, captureID string) error {
 	return err
 }
 
+func (s *Store) FinishJobWithoutCapture(ctx context.Context, jobID, message string) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE archive_jobs SET status = ?, status_message = ?, capture_id = NULL, finished_at = ? WHERE id = ?`,
+		StatusSucceeded, message, formatTime(now), jobID)
+	return err
+}
+
 func (s *Store) FailJob(ctx context.Context, jobID string, err error) error {
 	now := time.Now().UTC()
 	_, dbErr := s.db.ExecContext(ctx, `UPDATE archive_jobs SET status = ?, status_message = ?, error = ?, finished_at = ? WHERE id = ?`,

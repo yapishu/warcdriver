@@ -313,7 +313,8 @@ function scopeLabel(scope: ArchiveScope | string) {
     same_subdomain: "Subdomain",
     prefix: "Prefix",
     explicit_urls: "Explicit URLs",
-    substack: "Substack"
+    substack: "Substack",
+    podcast: "Podcast mirror"
   };
   return labels[scope] || scope.replace(/_/g, " ");
 }
@@ -504,6 +505,18 @@ function viewerHref(captureID: string, targetURL?: string) {
 
 function warcDownloadHref(captureID: string) {
   return `/api/warcs/${captureID}/download`;
+}
+
+function humanFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(1)} ${unit}`;
 }
 
 function BootScreen() {
@@ -1135,6 +1148,7 @@ function SitePage({ id }: { id: string }) {
   const [pageSize, setPageSize] = useState(20);
   const [refresh, setRefresh] = useState(0);
   const [checkingNewPosts, setCheckingNewPosts] = useState(false);
+  const [refreshingPodcast, setRefreshingPodcast] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("");
   const load = useLoader(
     () => api.siteIndex(id, { status, q: query, limit: pageSize, offset: page * pageSize }),
@@ -1170,11 +1184,23 @@ function SitePage({ id }: { id: string }) {
       setCheckingNewPosts(false);
     }
   }
+  async function refreshPodcast() {
+    setRefreshingPodcast(true);
+    setUpdateMessage("");
+    try {
+      const job = await api.refreshSitePodcast(id);
+      window.location.hash = `/jobs/${job.id}`;
+    } catch (error) {
+      setUpdateMessage(error instanceof Error ? error.message : "Could not refresh the podcast mirror");
+      setRefreshingPodcast(false);
+    }
+  }
   return (
     <Resource load={load}>
       {(index) => {
-        const { site, pages, total, canManage, visibility } = index;
+        const { site, pages, total, canManage, visibility, podcast } = index;
         const pageCount = Math.max(1, Math.ceil(total / pageSize));
+        const podcastFeedURL = podcast?.feedUrl ? new URL(podcast.feedUrl, window.location.origin).toString() : "";
         return (
         <>
           <PageHeader
@@ -1188,6 +1214,12 @@ function SitePage({ id }: { id: string }) {
                   <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }} placeholder="Search publication index" />
                 </label>
                 <span>{total} pages</span>
+                {podcast?.available && podcastFeedURL && (
+                  <label className="podcast-feed-box">
+                    <span>Podcast subscription · {podcast.episodeCount}/{podcast.expectedEpisodes} · {humanFileSize(podcast.totalBytes)}</span>
+                    <input value={podcastFeedURL} readOnly onFocus={(event) => event.currentTarget.select()} aria-label="Mirrored podcast subscription URL" />
+                  </label>
+                )}
                 {canManage && (
                   <select aria-label="Site visibility" value={visibility} onChange={async (event) => {
                     await api.updateSiteVisibility(id, event.target.value as Visibility);
@@ -1220,6 +1252,12 @@ function SitePage({ id }: { id: string }) {
                   <button className="icon-button" type="button" disabled={checkingNewPosts} onClick={checkForNewPosts}>
                     {checkingNewPosts ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
                     {checkingNewPosts ? "Checking sitemap…" : "Check for new posts"}
+                  </button>
+                )}
+                {canManage && podcast && (
+                  <button className="icon-button" type="button" disabled={refreshingPodcast} onClick={refreshPodcast}>
+                    {refreshingPodcast ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+                    {refreshingPodcast ? "Queuing…" : "Refresh podcast"}
                   </button>
                 )}
                 {canManage && updateMessage && <span>{updateMessage}</span>}

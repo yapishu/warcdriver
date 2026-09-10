@@ -105,6 +105,10 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		_ = a.store.AddJobLog(context.Background(), job.ID, level, msg)
 	}
 	jobLog("info", "job started")
+	if job.Scope == "podcast" {
+		a.runPodcastMirrorJob(jobCtx, job, jobLog)
+		return
+	}
 
 	var explicit []string
 	_ = json.Unmarshal([]byte(job.URLsJSON), &explicit)
@@ -387,6 +391,11 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		a.discardBrowsertrixRun(job.ID, jobLog)
 		_ = a.store.FailJob(context.Background(), job.ID, err)
 		return
+	}
+	if isSubstackMode {
+		if _, err := a.mirrorSubstackPodcast(jobCtx, site, captureStartURL, browserCookies, jobLog); err != nil {
+			jobLog("warn", "Substack podcast mirroring failed: "+err.Error())
+		}
 	}
 
 	if err := a.store.FinishJob(context.Background(), job.ID, capture.ID); err != nil {
