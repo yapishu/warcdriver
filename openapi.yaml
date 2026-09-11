@@ -628,7 +628,7 @@ components:
           type: boolean
     ArchiveScope:
       type: string
-      enum: [single_page, linked_pages, same_subdomain, prefix, explicit_urls, substack]
+      enum: [single_page, linked_pages, same_subdomain, prefix, explicit_urls, substack, podcast]
     Visibility:
       type: string
       enum: [private, public]

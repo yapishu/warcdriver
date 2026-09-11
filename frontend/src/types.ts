@@ -7,7 +7,7 @@ export type User = {
   createdAt: string;
 };
 
-export type ArchiveScope = "single_page" | "linked_pages" | "same_subdomain" | "prefix" | "explicit_urls" | "substack";
+export type ArchiveScope = "single_page" | "linked_pages" | "same_subdomain" | "prefix" | "explicit_urls" | "substack" | "podcast";
 export type Visibility = "private" | "public";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -63,6 +63,15 @@ export type SiteIndex = {
   offset: number;
   canManage: boolean;
   visibility: Visibility;
+  podcast?: PodcastSummary;
+};
+
+export type PodcastSummary = {
+  available: boolean;
+  episodeCount: number;
+  expectedEpisodes: number;
+  totalBytes: number;
+  feedUrl?: string;
 };
 
 export type SubstackUpdateResult = {

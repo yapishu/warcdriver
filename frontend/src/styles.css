@@ -136,9 +136,12 @@ label {
 }
 
 .sidebar {
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 20;
+  width: 248px;
+  height: 100dvh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -147,6 +150,10 @@ label {
   background: #171918;
   color: #f6f0e5;
   backdrop-filter: blur(20px);
+}
+
+.workspace {
+  grid-column: 2;
 }
 
 .wordmark {
@@ -1096,6 +1103,19 @@ button:disabled {
   padding-left: 34px;
 }
 
+.podcast-feed-box {
+  display: grid;
+  gap: 4px;
+  min-width: min(440px, 70vw);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.podcast-feed-box input {
+  width: 100%;
+  font: 12px/1.3 var(--mono);
+}
+
 .action-row {
   display: flex;
   flex-wrap: wrap;
@@ -1497,6 +1517,7 @@ button:disabled {
 
   .sidebar {
     position: static;
+    width: auto;
     height: auto;
     max-width: 100%;
     min-width: 0;
@@ -1505,6 +1526,10 @@ button:disabled {
     overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--hairline);
+  }
+
+  .workspace {
+    grid-column: 1;
   }
 
   .side-nav {

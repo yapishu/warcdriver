@@ -72,6 +72,9 @@ func (a *App) Routes() http.Handler {
 	apiRouter := chi.NewRouter()
 	apiRouter.Use(a.authMiddleware)
 	apiRouter.Get("/api/sites/{id}/pages", a.ListSiteIndex)
+	apiRouter.Get("/api/sites/{id}/podcast/feed.xml", a.ServePodcastFeed)
+	apiRouter.Get("/api/sites/{id}/podcast/media/{filename}", a.ServePodcastMedia)
+	apiRouter.Post("/api/sites/{id}/podcast/refresh", a.RefreshSitePodcast)
 	apiRouter.Put("/api/sites/{id}/visibility", a.UpdateSiteVisibility)
 	apiRouter.Post("/api/sites/{id}/retry-failed", a.RetryFailedSitePages)
 	apiRouter.Post("/api/sites/{id}/retry-page", a.RetryFailedSitePage)
@@ -598,6 +601,7 @@ func (a *App) DeleteSite(w http.ResponseWriter, r *http.Request, id api.Id) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = os.RemoveAll(a.podcastDir(id))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -683,7 +687,59 @@ func (a *App) ListSiteIndex(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"site": apiSite(site), "pages": filtered[offset:end], "total": total,
 		"limit": limit, "offset": offset, "canManage": canManage, "visibility": visibility,
+		"podcast": a.podcastSummary(id),
 	})
+}
+
+func (a *App) RefreshSitePodcast(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	user, _ := userFromContext(r.Context())
+	canManage, err := a.store.CanManageSite(r.Context(), id, user)
+	if err != nil || !canManage {
+		writeError(w, http.StatusForbidden, "site owner or admin required")
+		return
+	}
+	site, err := a.store.GetSite(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+	homepage := "https://" + site.Host + "/"
+	if _, err := substackHomepageURL(homepage); err != nil {
+		writeError(w, http.StatusBadRequest, "site is not a Substack publication")
+		return
+	}
+	if active, err := a.store.FindActiveArchiveJob(r.Context(), homepage, "podcast"); err == nil {
+		writeJSON(w, http.StatusAccepted, apiArchiveJob(active))
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items, err := a.store.ListItemsForSite(r.Context(), id, 1)
+	if err != nil || len(items) == 0 {
+		writeError(w, http.StatusConflict, "site has no prior capture settings to reuse")
+		return
+	}
+	original, err := a.store.GetArchiveJob(r.Context(), items[0].JobID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userID := ""
+	if user != nil {
+		userID = user.ID
+	}
+	visibility, _ := a.store.SiteVisibility(r.Context(), id)
+	job, err := a.store.CreateArchiveJob(r.Context(), userID, ArchiveJobCreate{
+		URL: homepage, Scope: "podcast", CookieProfileID: nullString(original.CookieProfileID), Visibility: visibility,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = a.store.AddJobLog(r.Context(), job.ID, "info", "podcast refresh queued")
+	writeJSON(w, http.StatusAccepted, apiArchiveJob(job))
 }
 
 func parseIntDefault(raw string, fallback int) int {

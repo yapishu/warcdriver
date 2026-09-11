@@ -113,6 +113,8 @@ export const api = {
     request<{ queued: number; jobs: ArchiveJob[] }>(`/api/sites/${id}/retry-failed`, { method: "POST" }),
   checkSiteForNewPosts: (id: string) =>
     request<SubstackUpdateResult>(`/api/sites/${id}/check-new-posts`, { method: "POST" }),
+  refreshSitePodcast: (id: string) =>
+    request<ArchiveJob>(`/api/sites/${id}/podcast/refresh`, { method: "POST" }),
   deleteSite: (id: string) => request<void>(`/api/sites/${id}`, { method: "DELETE" }),
   items: (params: { siteId?: string; q?: string; limit?: number } = {}) => {
     const query = new URLSearchParams();
