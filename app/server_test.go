@@ -107,6 +107,21 @@ func TestNormalizeArchiveJobSubstackModeUsesPublicationHomepage(t *testing.T) {
 	}
 }
 
+func TestNormalizeArchiveJobSubstackModeSupportsCustomDomain(t *testing.T) {
+	scope := api.Substack
+	req := api.CreateArchiveJobJSONRequestBody{Url: "https://Journal.Example.org/p/post?utm_source=x", Scope: &scope}
+	got, err := normalizeArchiveJobRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://journal.example.org/" || got.Scope != "substack" || got.Depth != 0 || got.MaxPages != 0 {
+		t.Fatalf("normalized custom-domain Substack job = %+v", got)
+	}
+	if got.PathExcludeRx != substackCommentExcludeRx {
+		t.Fatalf("path exclude = %q", got.PathExcludeRx)
+	}
+}
+
 func TestSiteVisibilityAndFailureCatalog(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenStore(ctx, t.TempDir())

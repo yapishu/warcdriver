@@ -9,15 +9,41 @@ import (
 )
 
 func TestSubstackHomepageURL(t *testing.T) {
-	got, err := substackHomepageURL("https://Publication.Substack.com/p/post?x=1")
+	tests := map[string]string{
+		"https://Publication.Substack.com/p/post?x=1": "https://publication.substack.com/",
+		"https://Journal.Example.org/p/post?x=1":      "https://journal.example.org/",
+	}
+	for rawURL, want := range tests {
+		got, err := substackHomepageURL(rawURL)
+		if err != nil {
+			t.Fatalf("substackHomepageURL(%q): %v", rawURL, err)
+		}
+		if got != want {
+			t.Fatalf("substackHomepageURL(%q) = %q, want %q", rawURL, got, want)
+		}
+	}
+	if _, err := substackHomepageURL("https://substack.com/"); err == nil {
+		t.Fatal("expected the central Substack host to fail")
+	}
+}
+
+func TestDiscoverSubstackPostsSupportsCustomDomain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><urlset>` +
+			`<url><loc>https://journal.example.org/p/one</loc></url>` +
+			`<url><loc>https://journal.example.org/p/two</loc></url>` +
+			`<url><loc>https://publication.substack.com/p/not-this-publication</loc></url>` +
+			`</urlset>`))
+	}))
+	defer server.Close()
+
+	client := &http.Client{Transport: substackTestTransport(server.URL)}
+	posts, err := discoverSubstackPosts(context.Background(), client, "https://journal.example.org/p/seed")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "https://publication.substack.com/" {
-		t.Fatalf("homepage = %q", got)
-	}
-	if _, err := substackHomepageURL("https://example.com/"); err == nil {
-		t.Fatal("expected non-Substack URL to fail")
+	if len(posts) != 2 || posts[0] != "https://journal.example.org/p/one" || posts[1] != "https://journal.example.org/p/two" {
+		t.Fatalf("posts = %#v", posts)
 	}
 }
 
@@ -34,16 +60,41 @@ func TestDiscoverSubstackPostsFiltersAndDeduplicates(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		req.URL.Scheme = "http"
-		req.URL.Host = strings.TrimPrefix(server.URL, "http://")
-		return http.DefaultTransport.RoundTrip(req)
-	})}
+	client := &http.Client{Transport: substackTestTransport(server.URL)}
 	posts, err := discoverSubstackPosts(context.Background(), client, "https://publication.substack.com/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(posts) != 2 || !strings.HasSuffix(posts[0], "/p/one") || !strings.HasSuffix(posts[1], "/p/two") {
+		t.Fatalf("posts = %#v", posts)
+	}
+}
+
+func TestDiscoverSubstackPublicationUsesRedirectedCustomDomain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Logical-Host") == "nonzionism.substack.com" {
+			http.Redirect(w, r, "https://nonzionism.com/sitemap.xml", http.StatusMovedPermanently)
+			return
+		}
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><urlset>` +
+			`<url><loc>https://nonzionism.com/p/one</loc></url>` +
+			`<url><loc>https://nonzionism.com/p/two</loc></url>` +
+			`</urlset>`))
+	}))
+	defer server.Close()
+
+	homepage, posts, err := discoverSubstackPublication(
+		context.Background(),
+		&http.Client{Transport: substackTestTransport(server.URL)},
+		"https://nonzionism.substack.com/p/seed",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if homepage != "https://nonzionism.com/" {
+		t.Fatalf("homepage = %q, want redirected custom domain", homepage)
+	}
+	if len(posts) != 2 || posts[0] != "https://nonzionism.com/p/one" || posts[1] != "https://nonzionism.com/p/two" {
 		t.Fatalf("posts = %#v", posts)
 	}
 }
@@ -106,3 +157,22 @@ func TestClassifyFailedSubstackImagesSeparatesBrokenSources(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+func substackTestTransport(serverURL string) http.RoundTripper {
+	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		logicalURL := *req.URL
+		networkReq := req.Clone(req.Context())
+		networkURL := logicalURL
+		networkURL.Scheme = "http"
+		networkURL.Host = strings.TrimPrefix(serverURL, "http://")
+		networkReq.URL = &networkURL
+		networkReq.Header.Set("X-Test-Logical-Host", logicalURL.Hostname())
+		resp, err := http.DefaultTransport.RoundTrip(networkReq)
+		if resp != nil {
+			logicalReq := req.Clone(req.Context())
+			logicalReq.URL = &logicalURL
+			resp.Request = logicalReq
+		}
+		return resp, err
+	})
+}

@@ -11,7 +11,11 @@ class WARCdriverFontLoader {
       return false;
     }
     const host = location.hostname.toLowerCase();
-    return Boolean(document.fonts) && (host === "substack.com" || host.endsWith(".substack.com"));
+    const usesSubstackAssets = Boolean(document.querySelector(
+      'link[href*="//substackcdn.com/"], script[src*="//substackcdn.com/"], link[href*="//substack.com/"], script[src*="//substack.com/"]'
+    ));
+    return Boolean(document.fonts) &&
+      (host === "substack.com" || host.endsWith(".substack.com") || usesSubstackAssets);
   }
 
   async* run(ctx) {

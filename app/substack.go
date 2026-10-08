@@ -26,39 +26,49 @@ func substackHomepageURL(rawURL string) (string, error) {
 		return "", err
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if host == "substack.com" || !strings.HasSuffix(host, ".substack.com") {
-		return "", fmt.Errorf("Substack mode requires a publication URL such as https://publication.substack.com")
+	if host == "substack.com" {
+		return "", fmt.Errorf("Substack mode requires a publication URL, not substack.com itself")
 	}
 	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: "/"}).String(), nil
 }
 
 func discoverSubstackPosts(ctx context.Context, client *http.Client, rawURL string) ([]string, error) {
+	_, posts, err := discoverSubstackPublication(ctx, client, rawURL)
+	return posts, err
+}
+
+func discoverSubstackPublication(ctx context.Context, client *http.Client, rawURL string) (string, []string, error) {
 	homepage, err := substackHomepageURL(rawURL)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if client == nil {
 		client = &http.Client{Timeout: substackSitemapTimeout}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, homepage+"sitemap.xml", nil)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	req.Header.Set("Accept", "application/xml,text/xml;q=0.9,*/*;q=0.1")
 	req.Header.Set("User-Agent", "WARCdriver/1.0 Substack sitemap discovery")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch Substack sitemap: %w", err)
+		return "", nil, fmt.Errorf("fetch Substack sitemap: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		return nil, fmt.Errorf("fetch Substack sitemap: HTTP %d", resp.StatusCode)
+		return "", nil, fmt.Errorf("fetch Substack sitemap: HTTP %d", resp.StatusCode)
+	}
+	if resp.Request != nil && resp.Request.URL != nil {
+		if effective, effectiveErr := substackHomepageURL(resp.Request.URL.String()); effectiveErr == nil {
+			homepage = effective
+		}
 	}
 	var sitemap substackSitemap
 	decoder := xml.NewDecoder(io.LimitReader(resp.Body, 16<<20))
 	if err := decoder.Decode(&sitemap); err != nil {
-		return nil, fmt.Errorf("parse Substack sitemap: %w", err)
+		return "", nil, fmt.Errorf("parse Substack sitemap: %w", err)
 	}
 	home, _ := url.Parse(homepage)
 	seen := map[string]bool{}
@@ -78,10 +88,10 @@ func discoverSubstackPosts(ctx context.Context, client *http.Client, rawURL stri
 		posts = append(posts, candidate.String())
 	}
 	if len(posts) == 0 {
-		return nil, fmt.Errorf("Substack sitemap did not contain any post URLs")
+		return "", nil, fmt.Errorf("Substack sitemap did not contain any post URLs on %s", home.Hostname())
 	}
 	sort.Strings(posts)
-	return posts, nil
+	return homepage, posts, nil
 }
 
 func isSubstackPostURL(rawURL string) bool {

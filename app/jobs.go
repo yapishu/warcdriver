@@ -113,7 +113,8 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	var explicit []string
 	_ = json.Unmarshal([]byte(job.URLsJSON), &explicit)
 	isFullSubstackMode := job.Scope == "substack"
-	isSubstackUpdate := job.Scope == "explicit_urls" && isSubstackURL(job.URL) && allSubstackPostURLs(explicit)
+	isSubstackUpdate := job.Scope == "explicit_urls" && job.PathExcludeRx.Valid &&
+		job.PathExcludeRx.String == substackCommentExcludeRx && allSubstackPostURLs(explicit)
 	isSubstackMode := isFullSubstackMode || isSubstackUpdate
 	isSubstackCapture := isSubstackMode || isSubstackPostURL(job.URL)
 	validateSubstackImages := isSubstackCapture
@@ -123,13 +124,12 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 	captureMaxPages := job.MaxPages
 	if isFullSubstackMode {
 		var err error
-		explicit, err = discoverSubstackPosts(jobCtx, nil, job.URL)
+		captureStartURL, explicit, err = discoverSubstackPublication(jobCtx, nil, job.URL)
 		if err != nil {
 			jobLog("error", err.Error())
 			_ = a.store.FailJob(ctx, job.ID, err)
 			return
 		}
-		captureStartURL, _ = substackHomepageURL(job.URL)
 		captureScope = "explicit_urls"
 		captureDepth = 0
 		captureMaxPages = len(explicit) + 1
@@ -150,7 +150,7 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 			_ = a.store.FailJob(ctx, job.ID, err)
 			return
 		}
-		browserCookies, err = browserCookiesForProfile(profile, job.URL)
+		browserCookies, err = browserCookiesForProfile(profile, captureStartURL)
 		if err != nil {
 			jobLog("error", "cookie profile failed: "+err.Error())
 			_ = a.store.FailJob(ctx, job.ID, err)
@@ -265,13 +265,20 @@ func (a *App) runArchiveJob(ctx context.Context, job *ArchiveJobRecord) {
 		}
 	}
 	siteHost := hostFromURL(job.URL)
+	if isSubstackMode {
+		siteHost = hostFromURL(captureStartURL)
+	}
 	site, err := a.store.UpsertSite(jobCtx, siteHost, first.Title, localSummary(first.Markdown))
 	if err != nil {
 		jobLog("error", err.Error())
 		_ = a.store.FailJob(context.Background(), job.ID, err)
 		return
 	}
-	capture, err := a.store.CreateCapture(jobCtx, job.ID, site.ID, nullString(job.UserID), job.URL, first.Title, result.WARCPath, job.Visibility)
+	captureURL := job.URL
+	if isSubstackMode {
+		captureURL = captureStartURL
+	}
+	capture, err := a.store.CreateCapture(jobCtx, job.ID, site.ID, nullString(job.UserID), captureURL, first.Title, result.WARCPath, job.Visibility)
 	if err != nil {
 		jobLog("error", err.Error())
 		_ = a.store.FailJob(context.Background(), job.ID, err)

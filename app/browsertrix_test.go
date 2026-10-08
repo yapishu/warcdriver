@@ -318,6 +318,27 @@ func TestBrowsertrixConfigDefaultsSubstackCommentExclusion(t *testing.T) {
 	}
 }
 
+func TestBrowsertrixConfigUsesSubstackBehaviorForCustomDomainMode(t *testing.T) {
+	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
+		JobID:        "custom-domain-substack",
+		StartURL:     "https://journal.example.org/",
+		Scope:        "explicit_urls",
+		ExplicitURLs: []string{"https://journal.example.org/p/post"},
+		SubstackMode: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exclude, ok := cfg["scopeExcludeRx"].(string)
+	if !ok || !regexp.MustCompile(exclude).MatchString("https://journal.example.org/p/post/comments") {
+		t.Fatalf("scopeExcludeRx = %v, want custom-domain comment exclusion", cfg["scopeExcludeRx"])
+	}
+	behaviors, ok := cfg["behaviors"].([]string)
+	if !ok || slices.Contains(behaviors, "autoscroll") || !slices.Contains(behaviors, "siteSpecific") {
+		t.Fatalf("custom-domain Substack behaviors = %v", cfg["behaviors"])
+	}
+}
+
 func TestBrowsertrixConfigSubdomainAllowsUnlimitedDepth(t *testing.T) {
 	cfg, err := browsertrixConfig(BrowsertrixCaptureOptions{
 		JobID:      "subdomain",

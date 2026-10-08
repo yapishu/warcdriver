@@ -769,7 +769,7 @@ function CaptureDock() {
               type="url"
               value={url}
               onChange={(event) => updateURL(event.target.value)}
-              placeholder="https://publication.substack.com/p/article"
+              placeholder="https://publication.example/p/article"
               required
             />
           </label>
