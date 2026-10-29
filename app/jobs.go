@@ -562,6 +562,9 @@ func (a *App) discardBrowsertrixRun(jobID string, jobLog func(level, msg string)
 }
 
 func (a *App) replaceCapturedItem(ctx context.Context, job *ArchiveJobRecord, capture *CaptureRecord, site *SiteRecord, page CapturedPage, shouldEnrich bool, jobLog func(level, msg string)) error {
+	if !page.Replayable {
+		return fmt.Errorf("replacement archive has no replayable document response for %s", page.URL)
+	}
 	if _, err := a.store.GetItem(ctx, job.ReplaceItemID.String); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("replacement item not found")

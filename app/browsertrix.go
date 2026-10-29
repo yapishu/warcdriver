@@ -414,7 +414,7 @@ func readBrowsertrixCapturedPages(collectionDir string) ([]CapturedPage, error) 
 		return nil, err
 	}
 	replayable, err := readBrowsertrixReplayableURLs(collectionDir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
@@ -425,11 +425,7 @@ func readBrowsertrixCapturedPages(collectionDir string) ([]CapturedPage, error) 
 			continue
 		}
 		seen[key] = true
-		if replayable == nil {
-			page.Replayable = true
-		} else {
-			page.Replayable = browsertrixReplayableURLMatch(replayable, key)
-		}
+		page.Replayable = browsertrixReplayableURLMatch(replayable, key)
 		out = append(out, page)
 	}
 	if len(out) == 0 {
@@ -439,6 +435,14 @@ func readBrowsertrixCapturedPages(collectionDir string) ([]CapturedPage, error) 
 }
 
 func readBrowsertrixReplayableURLs(collectionDir string) (map[string]bool, error) {
+	plain, err := os.Open(filepath.Join(collectionDir, "indexes", "index.cdxj"))
+	if err == nil {
+		defer plain.Close()
+		return readBrowsertrixReplayableURLsFromCDX(plain)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	f, err := os.Open(filepath.Join(collectionDir, "indexes", "index.cdx.gz"))
 	if err != nil {
 		return nil, err
@@ -456,7 +460,7 @@ func readBrowsertrixReplayableURLsFromWACZ(path string) (map[string]bool, error)
 	defer zr.Close()
 
 	for _, file := range zr.File {
-		if file.Name != "indexes/index.cdx.gz" {
+		if file.Name != "indexes/index.cdx.gz" && file.Name != "indexes/index.cdxj" {
 			continue
 		}
 		rc, err := file.Open()
@@ -464,6 +468,9 @@ func readBrowsertrixReplayableURLsFromWACZ(path string) (map[string]bool, error)
 			return nil, err
 		}
 		defer rc.Close()
+		if file.Name == "indexes/index.cdxj" {
+			return readBrowsertrixReplayableURLsFromCDX(rc)
+		}
 		return readBrowsertrixReplayableURLsFromGzip(rc)
 	}
 	return nil, os.ErrNotExist
@@ -475,9 +482,12 @@ func readBrowsertrixReplayableURLsFromGzip(r io.Reader) (map[string]bool, error)
 		return nil, err
 	}
 	defer gz.Close()
+	return readBrowsertrixReplayableURLsFromCDX(gz)
+}
 
+func readBrowsertrixReplayableURLsFromCDX(r io.Reader) (map[string]bool, error) {
 	replayable := map[string]bool{}
-	scanner := bufio.NewScanner(gz)
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

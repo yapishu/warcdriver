@@ -2,9 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,6 +40,10 @@ func TestCaptureArchiveWithBrowsertrixImportsWorkerResult(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(jobDir, "browsertrix.log"), []byte(`{"timestamp":"2026-06-19T00:00:00Z","logLevel":"info","context":"general","message":"Crawling done","details":{}}`+"\n"), 0o644)
 
 		collectionDir := filepath.Join(app.dataDir, "browsertrix", "runs", "collections", jobID)
+		if err := writeBrowsertrixTestIndex(collectionDir, "https://example.com/", "https://example.com/linked"); err != nil {
+			t.Error(err)
+			return
+		}
 		pagesDir := filepath.Join(collectionDir, "pages")
 		_ = os.MkdirAll(pagesDir, 0o755)
 		pages := `{"format":"json-pages-1.0","id":"pages","title":"Seed Pages","hasText":"true"}` + "\n" +
@@ -82,6 +88,9 @@ func TestCaptureArchiveWithBrowsertrixImportsWorkerResult(t *testing.T) {
 		t.Fatalf("unexpected linked page import: %+v", result.Pages[1])
 	}
 	for _, page := range result.Pages {
+		if !page.Replayable {
+			t.Fatalf("indexed page should be replayable: %+v", page)
+		}
 		if strings.Contains(page.URL, "rate-limited") {
 			t.Fatalf("failed extra page should not be indexed: %+v", page)
 		}
@@ -127,6 +136,10 @@ func TestCaptureArchiveWithBrowsertrixPreservesUnlimitedSubdomainDepth(t *testin
 		_ = os.Rename(filepath.Join(jobDir, "queued"), filepath.Join(jobDir, "running"))
 
 		collectionDir := app.browsertrixCollectionDir(jobID)
+		if err := writeBrowsertrixTestIndex(collectionDir, "https://example.com/"); err != nil {
+			t.Error(err)
+			return
+		}
 		pagesDir := filepath.Join(collectionDir, "pages")
 		_ = os.MkdirAll(pagesDir, 0o755)
 		pages := `{"format":"json-pages-1.0","id":"pages","title":"Seed Pages","hasText":"true"}` + "\n" +
@@ -488,6 +501,125 @@ func TestReadBrowsertrixReplayableURLsFromWACZ(t *testing.T) {
 	}
 	if replayable[normalizeURL("https://example.com/missing")] {
 		t.Fatal("expected 404 page to not be replayable")
+	}
+}
+
+func writeBrowsertrixTestIndex(collectionDir string, urls ...string) error {
+	indexDir := filepath.Join(collectionDir, "indexes")
+	if err := os.MkdirAll(indexDir, 0o755); err != nil {
+		return err
+	}
+	var cdx strings.Builder
+	for _, url := range urls {
+		record, err := json.Marshal(map[string]string{"url": url, "mime": "text/html", "status": "200", "filename": "test.warc.gz"})
+		if err != nil {
+			return err
+		}
+		cdx.WriteString("com,example)/ 20260619000000 " + string(record) + "\n")
+	}
+	return os.WriteFile(filepath.Join(indexDir, "index.cdxj"), []byte(cdx.String()), 0o644)
+}
+
+func TestReadBrowsertrixCapturedPagesRequiresIndex(t *testing.T) {
+	for _, state := range []string{"missing", "empty", "pageinfo-only", "unreadable", "invalid-gzip"} {
+		t.Run(state, func(t *testing.T) {
+			collectionDir := t.TempDir()
+			pagesDir := filepath.Join(collectionDir, "pages")
+			if err := os.MkdirAll(pagesDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			page := `{"url":"https://example.com/","title":"Example","mime":"text/html","status":200,"text":"Home"}` + "\n"
+			if err := os.WriteFile(filepath.Join(pagesDir, "pages.jsonl"), []byte(page), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			indexDir := filepath.Join(collectionDir, "indexes")
+			switch state {
+			case "empty":
+				if err := writeBrowsertrixTestIndex(collectionDir); err != nil {
+					t.Fatal(err)
+				}
+			case "pageinfo-only":
+				if err := writeBrowsertrixTestIndex(collectionDir, "urn:pageinfo:https://example.com/"); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				if err := os.MkdirAll(filepath.Join(indexDir, "index.cdxj"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "invalid-gzip":
+				if err := os.MkdirAll(indexDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(indexDir, "index.cdx.gz"), []byte("invalid gzip"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pages, err := readBrowsertrixCapturedPages(collectionDir)
+			if state == "empty" || state == "pageinfo-only" {
+				if err != nil || len(pages) != 1 || pages[0].Replayable {
+					t.Fatalf("pages = %+v, err = %v; want one non-replayable page", pages, err)
+				}
+			} else if err == nil {
+				t.Fatal("expected index read error")
+			} else if state == "missing" && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected missing index error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestReadBrowsertrixReplayableIndexFormats(t *testing.T) {
+	cdx := []byte(`com,example)/ 20260619000000 {"url":"https://example.com/","mime":"text/html","status":"200","filename":"test.warc.gz"}` + "\n" +
+		`com,example)/missing 20260619000000 {"url":"https://example.com/missing","mime":"text/html","status":"404","filename":"test.warc.gz"}` + "\n")
+	for _, name := range []string{"index.cdxj", "index.cdx.gz"} {
+		t.Run(name, func(t *testing.T) {
+			data := cdx
+			if strings.HasSuffix(name, ".gz") {
+				var buf bytes.Buffer
+				gz := gzip.NewWriter(&buf)
+				if _, err := gz.Write(cdx); err != nil {
+					t.Fatal(err)
+				}
+				if err := gz.Close(); err != nil {
+					t.Fatal(err)
+				}
+				data = buf.Bytes()
+			}
+			collectionDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(collectionDir, "indexes"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(collectionDir, "indexes", name), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var archive bytes.Buffer
+			zw := zip.NewWriter(&archive)
+			entry, err := zw.Create("indexes/" + name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := entry.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			if err := zw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			archivePath := filepath.Join(collectionDir, "capture.wacz")
+			if err := os.WriteFile(archivePath, archive.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for source, read := range map[string]func() (map[string]bool, error){
+				"directory": func() (map[string]bool, error) { return readBrowsertrixReplayableURLs(collectionDir) },
+				"wacz":      func() (map[string]bool, error) { return readBrowsertrixReplayableURLsFromWACZ(archivePath) },
+			} {
+				t.Run(source, func(t *testing.T) {
+					urls, err := read()
+					if err != nil || len(urls) != 1 || !urls[normalizeURL("https://example.com/")] {
+						t.Fatalf("replayable URLs = %v, err = %v; want only successful page", urls, err)
+					}
+				})
+			}
+		})
 	}
 }
 
